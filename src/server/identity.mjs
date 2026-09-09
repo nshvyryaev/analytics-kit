@@ -13,8 +13,10 @@
  */
 import { createHmac } from 'node:crypto';
 
-/** Шестнадцати байт хватает: столкновение на наших объёмах невероятно. */
-const BYTES = 16;
+/**
+ * 22 символа base64url — это 132 бита (16.5 байта). Этого с запасом хватает
+ * для защиты от коллизий на наших объёмах.
+ */
 
 export function subject(namespaced, key) {
   // Пустой ключ — не «считать без ключа», а нечем считать. Тихо посчитанный
@@ -30,5 +32,10 @@ export function subject(namespaced, key) {
     .replace(/\//g, '_');
 }
 
-export const playerSubject = (platform, playerId, key) => subject(`p:${platform}:${playerId}`, key);
+export const playerSubject = (platform, playerId, key) =>
+  subject(`p:${platform.length}:${platform}:${playerId}`, key);
+
+// anonSubject не кодирует длину анонима, потому что это одно поле и склеивать
+// нечего — нет соседних полей, которые могли бы создать коллизию при совпадении
+// границ как в playerSubject('vk', '1:2') vs playerSubject('vk:1', '2').
 export const anonSubject = (anonId, key) => subject(`a:${anonId}`, key);
