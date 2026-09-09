@@ -76,6 +76,25 @@ test('пачка длиннее предела обрезается, а не р�
   db.close();
 });
 
+test('лимит на сессию режется по остатку бюджета, а не по факту его достижения', () => {
+  const { db, receiver } = setup();
+  const { body } = receiver.session({ app: 'word-chain', anon_id: 'а1', ctx });
+  let q = 0;
+  const send = (count) => {
+    const e = Array.from({ length: count }, () => {
+      q += 1;
+      return { q, n: 'pause', t: 10_000, p: { ms: 1 } };
+    });
+    return receiver.collect({ s: body.session_id, sent_at: 10_000, e });
+  };
+  for (let i = 0; i < 49; i += 1) send(100); // seen = 4900
+  send(50); // seen = 4950, остаток бюджета — 50
+  send(100); // пачка больше остатка: должно записаться только 50, а не 100
+  const { n } = db.prepare('SELECT COUNT(*) AS n FROM events').get();
+  assert.equal(n, 5000);
+  db.close();
+});
+
 test('неизвестная сессия не роняет приём', () => {
   const { db, receiver } = setup();
   assert.equal(receiver.collect({ s: 'нет-такой', sent_at: 10_000, e: [] }).status, 204);

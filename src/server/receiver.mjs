@@ -18,6 +18,10 @@ import { anonSubject, playerSubject } from './identity.mjs';
 
 const MAX_BATCH = 100;
 const MAX_SESSION_EVENTS = 5000;
+// Приёмник читает данные из открытой сети: без потолка на число ключей в
+// `counts` поток запросов со случайным `s` рос бы Map неограниченно — это
+// OOM в процессе, который держит платежи.
+const MAX_COUNTS_ENTRIES = 10_000;
 
 const dayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
 const token = () => randomBytes(16).toString('base64url');
@@ -35,17 +39,39 @@ export function createReceiver({
   // второй путь записи ради семи событий в сутки.
   const serverSessions = new Map();
 
+  /**
+   * Пишет счётчик событий сессии, вытесняя старейшую запись при переполнении
+   * потолка. `Map` хранит ключи в порядке вставки, поэтому вытеснение —
+   * первый ключ итератора. Вытеснение лишь обнуляет накопленный бюджет для
+   * давней сессии — это приемлемо: счётчик защищает от потока запросов, а не
+   * ведёт точный учёт.
+   */
+  function bumpCount(id, value) {
+    if (!counts.has(id) && counts.size >= MAX_COUNTS_ENTRIES) {
+      counts.delete(counts.keys().next().value);
+    }
+    counts.set(id, value);
+  }
+
   function serverSession(app) {
     let id = serverSessions.get(app);
     if (id) return id;
     id = token();
     const at = now();
-    sink.session({
-      session_id: id, app, subject_id: 'server', anon_subject: 'server',
-      key_version: keyVersion, platform: 'server', verified: 1,
-      app_version: null, language: null, os: null, mobile: null, screen: null,
-      entry: 'server', day: dayKey(at), started_at: at, last_seen_at: at,
-    });
+    try {
+      sink.session({
+        session_id: id, app, subject_id: 'server', anon_subject: 'server',
+        key_version: keyVersion, platform: 'server', verified: 1,
+        app_version: null, language: null, os: null, mobile: null, screen: null,
+        entry: 'server', day: dayKey(at), started_at: at, last_seen_at: at,
+      });
+    } catch (error) {
+      // Как и с клиентскими событиями: сбой хранилища не должен ронять
+      // процесс, который держит платежи. Без записанной сессии писать
+      // событие в неё нельзя — track() ниже это учитывает.
+      console.error('[аналитика] серверная сессия не создана', error);
+      return null;
+    }
     serverSessions.set(app, id);
     return id;
   }
@@ -59,23 +85,38 @@ export function createReceiver({
 
       const checked = (body.launch && verify(body.launch)) || { ok: false };
       const anon = anonSubject(anonId, key);
-      const platform = checked.ok ? checked.platform : 'local';
-      const subjectId = checked.ok ? playerSubject(platform, checked.playerId, key) : anon;
+      // platform приходит из verify(), а verify сам разбирает недоверенный
+      // body.launch — как и всякую строку из тела запроса, её ограничиваем
+      // длиной. Если verify вернул ok:true с нестроковой платформой, это его
+      // баг, а не подписанный запуск: понижаем до неудостоверённой сессии,
+      // а не роняем обработку разыменованием null внутри playerSubject().
+      const verifiedPlatform = checked.ok ? bounded(checked.platform, 16) : null;
+      const ok = checked.ok && verifiedPlatform !== null;
+      const platform = ok ? verifiedPlatform : 'local';
+      const subjectId = ok ? playerSubject(platform, checked.playerId, key) : anon;
 
       const ctx = body.ctx ?? {};
       const at = now();
       const id = token();
-      sink.session({
-        session_id: id, app, subject_id: subjectId, anon_subject: anon,
-        key_version: keyVersion, platform, verified: checked.ok ? 1 : 0,
-        app_version: bounded(ctx.app_version, 40),
-        language: bounded(ctx.language, 8),
-        os: bounded(ctx.os, 16),
-        mobile: ctx.mobile ? 1 : 0,
-        screen: bounded(ctx.screen, 4),
-        entry: bounded(ctx.entry, 16),
-        day: dayKey(at), started_at: at, last_seen_at: at,
-      });
+      try {
+        sink.session({
+          session_id: id, app, subject_id: subjectId, anon_subject: anon,
+          key_version: keyVersion, platform, verified: ok ? 1 : 0,
+          app_version: bounded(ctx.app_version, 40),
+          language: bounded(ctx.language, 8),
+          os: bounded(ctx.os, 16),
+          mobile: ctx.mobile ? 1 : 0,
+          screen: bounded(ctx.screen, 4),
+          entry: bounded(ctx.entry, 16),
+          day: dayKey(at), started_at: at, last_seen_at: at,
+        });
+      } catch (error) {
+        // Сбой хранилища — тоже точка отказа, а не только собственно приём
+        // событий. Клиент переживёт 503: оставит session_id пустым и
+        // продолжит копить события в очереди, не роняя процесс с платежами.
+        console.error('[аналитика] сессия не записана', error);
+        return { status: 503, body: { error: 'store' } };
+      }
       return { status: 200, body: { session_id: id } };
     },
 
@@ -87,7 +128,11 @@ export function createReceiver({
       if (!sessionId || list.length === 0) return { status: 204 };
 
       const seen = counts.get(sessionId) ?? 0;
-      if (seen >= MAX_SESSION_EVENTS) return { status: 204 };
+      // Остаток бюджета, а не просто факт достижения потолка: проверка
+      // «seen >= MAX_SESSION_EVENTS» пропустила бы пачку из 100 событий
+      // целиком при seen = 4980, дав 5080 записей вместо 5000.
+      const budget = MAX_SESSION_EVENTS - seen;
+      if (budget <= 0) return { status: 204 };
 
       const receivedAt = now();
       // Часы на мобильных врут регулярно. Без поправки событие с телефона с
@@ -96,7 +141,7 @@ export function createReceiver({
       const skew = receivedAt - sentAt;
 
       const rows = [];
-      for (const item of list.slice(0, MAX_BATCH)) {
+      for (const item of list.slice(0, Math.min(MAX_BATCH, budget))) {
         const name = bounded(item?.n, 64);
         const seq = Number.isInteger(item?.q) ? item.q : null;
         if (!name || seq === null) continue;
@@ -111,7 +156,12 @@ export function createReceiver({
 
       try {
         const written = sink.events(rows);
-        counts.set(sessionId, seen + written);
+        // Писать счётчик только когда реально что-то записано: для чужой
+        // (несуществующей) сессии sink.events возвращает 0, и если бы Map
+        // всё равно заводила запись, поток запросов со случайным `s` растил
+        // бы её неограниченно — не имея настоящей сессии, ни один такой ключ
+        // никогда бы не переиспользовался и не удалялся сам.
+        if (written > 0) bumpCount(sessionId, seen + written);
       } catch (error) {
         // Упавшая пачка теряется и остаётся в журнале. Процесс, который
         // принимает деньги, не должен падать из-за статистики.
@@ -124,10 +174,11 @@ export function createReceiver({
     track(app, name, props) {
       if (!allowed.has(app)) return;
       const id = serverSession(app);
+      if (!id) return;
       const at = now();
       const { known, props: clean } = validate(name, props);
       const seq = (counts.get(id) ?? 0) + 1;
-      counts.set(id, seq);
+      bumpCount(id, seq);
       try {
         sink.events([{
           session_id: id, seq, name, ts: at, received_at: at,

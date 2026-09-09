@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validate, MAX_STR, MAX_PROPS_BYTES } from '../src/schema.mjs';
+import { validate, MAX_STR, MAX_PROPS_BYTES, MAX_UNKNOWN_KEYS } from '../src/schema.mjs';
 
 test('известное событие сохраняет объявленные свойства', () => {
   const out = validate('level_start', { mode: 'daily', length: 5, level: 3, resumed: false });
@@ -37,6 +37,23 @@ test('длинная строка обрезается', () => {
 test('слишком большие свойства урезаются до предела', () => {
   const out = validate('level_end', { chain: Array.from({ length: 500 }, () => 'СЛОВО') });
   assert.ok(JSON.stringify(out.props).length <= 2048);
+});
+
+test('незнакомое событие с тысячами ключей обрабатывается быстро и режется до потолка', () => {
+  const source = {};
+  for (let i = 0; i < 5000; i += 1) source[`key${i}`] = i;
+
+  const started = Date.now();
+  const out = validate('нет_такого', source);
+  const elapsed = Date.now() - started;
+
+  assert.equal(out.known, false);
+  assert.ok(Object.keys(out.props).length <= MAX_UNKNOWN_KEYS);
+  // Без потолка на число ключей fit() пересериализует убывающий объект на
+  // каждый удаляемый ключ — O(n²) от размера тела запроса. С потолком в 32
+  // ключа обработка тела в 5000 ключей укладывается в доли секунды даже на
+  // медленной машине; секунда — заведомо щедрый запас.
+  assert.ok(elapsed < 1000, `validate() занял ${elapsed}мс на 5000 ключей`);
 });
 
 test('предел меряется в байтах UTF-8, а не в единицах длины строки', () => {

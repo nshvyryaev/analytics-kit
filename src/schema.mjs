@@ -12,6 +12,15 @@
 
 export const MAX_STR = 64;
 export const MAX_PROPS_BYTES = 2048;
+/**
+ * У известного события ключей и так ровно столько, сколько объявлено в
+ * словаре — ограничивать нечего, тело запроса не может добавить их сверху
+ * (цикл идёт по `shape`, а не по `source`). У незнакомого события ключи идут
+ * прямиком из тела запроса, и без явного потолка `fit()` ниже режет их по
+ * одному, на каждый шаг заново сериализуя убывающий объект — при тысячах
+ * ключей это O(n²) на точке входа, открытой в сеть.
+ */
+export const MAX_UNKNOWN_KEYS = 32;
 
 /**
  * Модуль общий для браузера и сервера, а `Buffer` в браузере не существует —
@@ -117,7 +126,7 @@ export function validate(name, props) {
   const out = {};
 
   if (!shape) {
-    for (const [key, value] of Object.entries(source)) {
+    for (const [key, value] of Object.entries(source).slice(0, MAX_UNKNOWN_KEYS)) {
       const kept = loose(value);
       if (kept !== undefined) out[key] = kept;
     }
