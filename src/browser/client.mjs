@@ -17,10 +17,19 @@
 
 const QUEUE_KEY = 'analytics.queue';
 
-/** Отправка по умолчанию: маяк на выгрузке, иначе обычный запрос. */
+/**
+ * Отправка по умолчанию: маяк на выгрузке, иначе обычный запрос.
+ *
+ * Оба пути бросают при отказе, а не возвращают `null`: `null` — законный
+ * успешный ответ (у маяка ответа нет вовсе), и только бросок даёт flush()
+ * отличить «ответа нет» от «не удалось» и вернуть пачку в очередь.
+ */
 function defaultSend(url, body, beacon) {
   if (beacon && typeof navigator !== 'undefined' && navigator.sendBeacon) {
-    navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+    // false — очередь браузера переполнена или тело слишком велико.
+    if (!navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))) {
+      throw new Error('sendBeacon отклонил пачку');
+    }
     return Promise.resolve(null);
   }
   return fetch(url, {
@@ -28,7 +37,10 @@ function defaultSend(url, body, beacon) {
     headers: { 'content-type': 'application/json' },
     body,
     keepalive: true,
-  }).then((response) => (response.ok ? response.text() : null));
+  }).then((response) => {
+    if (!response.ok) throw new Error(`ответ ${response.status}`);
+    return response.text();
+  });
 }
 
 export function createClient({
@@ -65,9 +77,8 @@ export function createClient({
       timer = null;
       void flush();
     }, flushMs);
-    // unref — только в Node (тестовый раннер, серверный SSR-прогон): висящий
-    // таймер иначе держит процесс живым все 15 секунд. В браузере у числового
-    // идентификатора таймера такого метода нет, поэтому опциональный вызов.
+    // unref нужен только в Node: иначе висящий таймер держит процесс живым
+    // все 15 секунд. У браузерного идентификатора метода нет — вызов через ?.
     timer.unref?.();
   };
 
@@ -78,6 +89,12 @@ export function createClient({
     if (!sessionId) {
       persist();
       return;
+    }
+    // Очередь сейчас сольётся — отложенный флаш по таймеру больше не нужен,
+    // иначе сработает вхолостую: лишнее пробуждение в вебвью не бесплатно.
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
     }
     const batch = queue;
     queue = [];
@@ -97,7 +114,9 @@ export function createClient({
       if (saved) {
         const parsed = JSON.parse(saved);
         seq = Number.isInteger(parsed.seq) ? parsed.seq : 0;
-        queue = Array.isArray(parsed.queue) ? [...parsed.queue, ...queue] : queue;
+        // Обрезаем сразу после слияния: иначе очередь у потолка плюс события
+        // до start() превысят maxQueue, и flush() уйдёт пачкой целиком.
+        queue = Array.isArray(parsed.queue) ? [...parsed.queue, ...queue].slice(-maxQueue) : queue;
       }
     } catch {
       // Испорченное хранилище — не повод не собирать дальше.
@@ -130,8 +149,14 @@ export function createClient({
   }
 
   async function stop(reason) {
-    track('session_end', { ms: now() - startedAt, events: seq, reason });
-    await flush(true);
+    // `now() - startedAt` — вне try самого track(), поэтому оборачиваем
+    // целиком: stop() зовут на pagehide без обработчика, падать нельзя.
+    try {
+      track('session_end', { ms: now() - startedAt, events: seq, reason });
+      await flush(true);
+    } catch {
+      // Последний маяк перед закрытием — падать нельзя ни при каких условиях.
+    }
   }
 
   return {

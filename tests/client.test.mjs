@@ -101,3 +101,147 @@ test('stop дописывает session_end', async () => {
   const batch = h.sent.find((r) => !r.url.endsWith('/session'));
   assert.equal(batch.body.e.at(-1).n, 'session_end');
 });
+
+test('восстановленная очередь обрезается по maxQueue вместе с натреканным до старта', async () => {
+  const h = harness();
+  // Сохранённая с прошлого запуска очередь уже у потолка.
+  h.store.set('analytics.queue', JSON.stringify({
+    seq: 3,
+    queue: [
+      { q: 1, n: 'a', t: 1 },
+      { q: 2, n: 'b', t: 2 },
+      { q: 3, n: 'c', t: 3 },
+    ],
+  }));
+  const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', maxQueue: 3, ...h });
+  // Событие до старта — законное накопление, но вместе с восстановленными
+  // тремя оно превышает потолок в 3.
+  client.track('до-старта', { ms: 0 });
+  await client.start(info);
+  await client.flush();
+  const batch = h.sent.find((r) => !r.url.endsWith('/session'));
+  assert.equal(batch.body.e.length, 3);
+  // Вытесняются самые старые — из сохранённой очереди, а не свежее событие.
+  assert.deepEqual(batch.body.e.map((e) => e.n), ['b', 'c', 'до-старта']);
+});
+
+/**
+ * Пути по умолчанию (`sendBeacon`/`fetch` без подстановки `send`) — то
+ * единственное, что реально работает в бою: все остальные тесты подставляют
+ * свой `send` и не видят дыр именно здесь. Подменяем `navigator` и `fetch`
+ * через `Object.defineProperty`, а не присваиванием: у Node глобальный
+ * `navigator` — геттер без сеттера, и `globalThis.navigator = ...` в ESM
+ * (строгий режим) молча бросает TypeError. Восстанавливаем оба глобальных
+ * объекта в `finally`, чтобы подмена не протекла в соседние тесты даже при
+ * падении текущего.
+ */
+function stubGlobals({ navigator: nav, fetch: fetchImpl }) {
+  const originals = {
+    navigator: Object.getOwnPropertyDescriptor(globalThis, 'navigator'),
+    fetch: Object.getOwnPropertyDescriptor(globalThis, 'fetch'),
+  };
+  Object.defineProperty(globalThis, 'navigator', {
+    value: nav, configurable: true, enumerable: true, writable: true,
+  });
+  Object.defineProperty(globalThis, 'fetch', {
+    value: fetchImpl, configurable: true, enumerable: true, writable: true,
+  });
+  return () => {
+    Object.defineProperty(globalThis, 'navigator', originals.navigator);
+    Object.defineProperty(globalThis, 'fetch', originals.fetch);
+  };
+}
+
+test('дефолтный sendBeacon: false не теряет пачку, возвращает её в очередь', async () => {
+  const store = new Map();
+  const storage = {
+    get: async (key) => store.get(key) ?? null,
+    set: async (key, value) => void store.set(key, value),
+  };
+  let beaconCalls = 0;
+  const restore = stubGlobals({
+    navigator: { sendBeacon: () => { beaconCalls += 1; return false; } },
+    fetch: async (url) => {
+      // Открытие сессии всегда идёт с beacon=false — через fetch.
+      assert.ok(url.endsWith('/session'));
+      return { ok: true, text: async () => JSON.stringify({ session_id: 'с1' }) };
+    },
+  });
+  try {
+    const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', storage });
+    await client.start(info);
+    client.track('pause', { ms: 1 });
+    await client.stop('pagehide'); // stop() шлёт через маяк (beacon=true)
+    assert.equal(beaconCalls, 1);
+    const saved = JSON.parse(store.get('analytics.queue'));
+    // Пачка (pause + session_end) вернулась в очередь, а не потерялась.
+    assert.deepEqual(saved.queue.map((e) => e.n), ['pause', 'session_end']);
+  } finally {
+    restore();
+  }
+});
+
+test('дефолтный fetch: ответ не-2xx не теряет пачку, возвращает её в очередь', async () => {
+  const store = new Map();
+  const storage = {
+    get: async (key) => store.get(key) ?? null,
+    set: async (key, value) => void store.set(key, value),
+  };
+  let fetchCalls = 0;
+  const restore = stubGlobals({
+    navigator: undefined, // без sendBeacon — гарантированно проверяем именно fetch
+    fetch: async (url) => {
+      fetchCalls += 1;
+      if (url.endsWith('/session')) {
+        return { ok: true, text: async () => JSON.stringify({ session_id: 'с1' }) };
+      }
+      return { ok: false, status: 500, text: async () => 'бэкенд лёг' };
+    },
+  });
+  try {
+    const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', storage });
+    await client.start(info);
+    client.track('pause', { ms: 1 });
+    await client.flush();
+    assert.equal(fetchCalls, 2); // /session + неудачная попытка пачки
+    const saved = JSON.parse(store.get('analytics.queue'));
+    assert.deepEqual(saved.queue.map((e) => e.n), ['pause']);
+  } finally {
+    restore();
+  }
+});
+
+test('дефолтные sendBeacon и fetch на успехе очищают очередь как обычно', async () => {
+  const store = new Map();
+  const storage = {
+    get: async (key) => store.get(key) ?? null,
+    set: async (key, value) => void store.set(key, value),
+  };
+  let beaconBody = null;
+  const restore = stubGlobals({
+    navigator: { sendBeacon: (url, blob) => { beaconBody = blob; return true; } },
+    fetch: async (url) => {
+      if (url.endsWith('/session')) {
+        return { ok: true, text: async () => JSON.stringify({ session_id: 'с1' }) };
+      }
+      return { ok: true, text: async () => null };
+    },
+  });
+  try {
+    const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', storage });
+    await client.start(info);
+    client.track('pause', { ms: 1 });
+    // Обычный flush — через fetch (beacon=false).
+    await client.flush();
+    let saved = JSON.parse(store.get('analytics.queue'));
+    assert.deepEqual(saved.queue, []);
+
+    // stop() — через sendBeacon (beacon=true), тоже должен очистить очередь.
+    await client.stop('pagehide');
+    assert.ok(beaconBody);
+    saved = JSON.parse(store.get('analytics.queue'));
+    assert.deepEqual(saved.queue, []);
+  } finally {
+    restore();
+  }
+});
