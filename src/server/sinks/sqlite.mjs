@@ -128,13 +128,24 @@ export function createSqliteSink(db) {
 
   return {
     session(row) {
-      db.exec('BEGIN');
       try {
-        insertSession.run(
+        db.exec('BEGIN');
+        const result = insertSession.run(
           row.session_id, row.app, row.subject_id, row.anon_subject, row.key_version,
           row.platform, row.verified, row.app_version, row.language, row.os,
           row.mobile, row.screen, row.entry, row.day, row.started_at, row.last_seen_at,
         );
+        // Повтор той же строки сессии (тот же session_id) — не ошибка: у
+        // площадки нет способа отличить потерянный ответ от необработанного
+        // запроса, и клиент вправе повторить вызов. INSERT OR IGNORE уже не
+        // задваивает саму запись в sessions, но subjects/activity/aliases —
+        // производные от неё, и их обновление должно случиться ровно один раз
+        // на session_id, а не на вызов, иначе счётчик sessions у игрока
+        // раздуется на повтор, которого сам игрок не делал.
+        if (result.changes === 0) {
+          db.exec('COMMIT');
+          return;
+        }
         upsertSubject.run(row.app, row.subject_id, row.day, row.day, row.platform);
         markActivity.run(row.app, row.day, row.subject_id);
         // Псевдоним от анонимного идентификатора и псевдоним игрока — один
@@ -156,8 +167,8 @@ export function createSqliteSink(db) {
       // пустит, а падать на чужом идентификаторе незачем — он приходит извне.
       if (!sessionExists.get(sessionId)) return 0;
 
-      db.exec('BEGIN');
       try {
+        db.exec('BEGIN');
         let written = 0;
         let latest = 0;
         for (const row of rows) {

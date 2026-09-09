@@ -35,6 +35,17 @@ test('вторая сессия не меняет первый день, но с
   db.close();
 });
 
+test('повтор одной и той же сессии не задваивает счётчик игрока', () => {
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  const row = session();
+  sink.session(row);
+  sink.session(row);
+  const subject = db.prepare('SELECT * FROM subjects WHERE subject_id = ?').get('ПС1');
+  assert.equal(subject.sessions, 1);
+  db.close();
+});
+
 test('день активности отмечается один раз', () => {
   const db = openAnalyticsDb(':memory:');
   const sink = createSqliteSink(db);
