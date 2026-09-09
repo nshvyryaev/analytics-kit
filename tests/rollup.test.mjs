@@ -74,3 +74,32 @@ test('отсечка убирает сырьё, но оставляет игро
   assert.equal(metric(db, 'dau'), 2);
   db.close();
 });
+
+test('счётчик побед у игрока переживает отсечку сырья', () => {
+  // Регрессия: пересчёт levels_won прямо из events без ограничения по дню
+  // после отсечки старых суток молча уменьшал счётчик. levels_won должен
+  // читаться из activity, которая отсечку переживает, и потому не меняться.
+  const db = filled();
+  rollup(db, DAY);
+  const before = db.prepare('SELECT levels_won FROM subjects WHERE subject_id = ?').get('ПС1').levels_won;
+  assert.equal(before, 1);
+  prune(db, { before: '2026-10-10' });
+  const after = db.prepare('SELECT levels_won FROM subjects WHERE subject_id = ?').get('ПС1').levels_won;
+  assert.equal(after, before);
+  db.close();
+});
+
+test('незнакомое событие не подделывает метрику по исходу', () => {
+  // Событие с именем, буквально равным составному ключу метрики, но пришедшее
+  // как незнакомое (known = 0), не должно сливаться с настоящей агрегацией
+  // по исходу — иначе клиент подделывает деловую метрику мимо словаря.
+  const db = filled();
+  const sink = createSqliteSink(db);
+  sink.events([
+    { session_id: 'с1', seq: 3, name: 'level_end:solved', ts: 1, received_at: 1, day: DAY, props: '{}', known: 0 },
+  ]);
+  rollup(db, DAY);
+  assert.equal(metric(db, 'level_end:solved'), 2);
+  assert.equal(metric(db, 'events_unknown'), 1);
+  db.close();
+});

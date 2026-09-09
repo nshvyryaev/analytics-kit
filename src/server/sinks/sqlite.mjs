@@ -67,9 +67,15 @@ const SCHEMA = `
   );
 
   CREATE TABLE IF NOT EXISTS activity (
-    app        TEXT NOT NULL,
-    day        TEXT NOT NULL,
-    subject_id TEXT NOT NULL,
+    app          TEXT NOT NULL,
+    day          TEXT NOT NULL,
+    subject_id   TEXT NOT NULL,
+    -- Подневные счётчики игрока. Живут здесь, а не только в events, потому
+    -- что activity устроена как «приложение × день × игрок» и переживает
+    -- отсечку сырья по построению — на ней и так стоит ретеншен.
+    levels_won   INTEGER NOT NULL DEFAULT 0,
+    purchases    INTEGER NOT NULL DEFAULT 0,
+    hints_bought INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (app, day, subject_id)
   ) WITHOUT ROWID;
 
