@@ -6,7 +6,10 @@
   "engines": { "node": ">=22" },
   "exports": {
     "./schema": "./src/schema.mjs",
-    "./browser": "./src/browser/index.mjs",
+    "./browser": {
+      "types": "./src/browser/index.d.ts",
+      "default": "./src/browser/index.mjs"
+    },
     "./server": "./src/server/index.mjs"
   },
   "files": ["src"],

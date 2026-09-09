@@ -58,7 +58,7 @@ test('неотправленное сохраняется и уходит сле
   const first = createClient({ endpoint: '/v1/collect', app: 'word-chain', ...broken });
   first.track('pause', { ms: 1 });
   await first.flush();
-  assert.ok(broken.store.get('analytics.queue'));
+  assert.ok(broken.store.get('analytics_queue'));
 
   const ok = harness();
   ok.store = broken.store;
@@ -105,7 +105,7 @@ test('stop дописывает session_end', async () => {
 test('восстановленная очередь обрезается по maxQueue вместе с натреканным до старта', async () => {
   const h = harness();
   // Сохранённая с прошлого запуска очередь уже у потолка.
-  h.store.set('analytics.queue', JSON.stringify({
+  h.store.set('analytics_queue', JSON.stringify({
     seq: 3,
     queue: [
       { q: 1, n: 'a', t: 1 },
@@ -173,7 +173,7 @@ test('дефолтный sendBeacon: false не теряет пачку, воз�
     client.track('pause', { ms: 1 });
     await client.stop('pagehide'); // stop() шлёт через маяк (beacon=true)
     assert.equal(beaconCalls, 1);
-    const saved = JSON.parse(store.get('analytics.queue'));
+    const saved = JSON.parse(store.get('analytics_queue'));
     // Пачка (pause + session_end) вернулась в очередь, а не потерялась.
     assert.deepEqual(saved.queue.map((e) => e.n), ['pause', 'session_end']);
   } finally {
@@ -204,7 +204,7 @@ test('дефолтный fetch: ответ не-2xx не теряет пачку
     client.track('pause', { ms: 1 });
     await client.flush();
     assert.equal(fetchCalls, 2); // /session + неудачная попытка пачки
-    const saved = JSON.parse(store.get('analytics.queue'));
+    const saved = JSON.parse(store.get('analytics_queue'));
     assert.deepEqual(saved.queue.map((e) => e.n), ['pause']);
   } finally {
     restore();
@@ -233,13 +233,13 @@ test('дефолтные sendBeacon и fetch на успехе очищают о
     client.track('pause', { ms: 1 });
     // Обычный flush — через fetch (beacon=false).
     await client.flush();
-    let saved = JSON.parse(store.get('analytics.queue'));
+    let saved = JSON.parse(store.get('analytics_queue'));
     assert.deepEqual(saved.queue, []);
 
     // stop() — через sendBeacon (beacon=true), тоже должен очистить очередь.
     await client.stop('pagehide');
     assert.ok(beaconBody);
-    saved = JSON.parse(store.get('analytics.queue'));
+    saved = JSON.parse(store.get('analytics_queue'));
     assert.deepEqual(saved.queue, []);
   } finally {
     restore();
