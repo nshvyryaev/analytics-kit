@@ -13,6 +13,14 @@
 export const MAX_STR = 64;
 export const MAX_PROPS_BYTES = 2048;
 
+/**
+ * Модуль общий для браузера и сервера, а `Buffer` в браузере не существует —
+ * импорт с ним уронил бы клиентскую сборку. `TextEncoder` — глобальный API
+ * и там, и там, поэтому байты UTF-8 считаем именно им.
+ */
+const encoder = new TextEncoder();
+const byteSize = (value) => encoder.encode(JSON.stringify(value)).length;
+
 const MODE = ['puzzle', 'daily', 'shared'];
 
 export const EVENTS = {
@@ -89,10 +97,15 @@ function loose(value) {
  * Урезает свойства до предела по размеру. Выбрасываются последние ключи, а не
  * случайные: порядок объявления в словаре идёт от важного к подробностям, и
  * терять хвост менее обидно, чем середину.
+ *
+ * Предел — в байтах UTF-8 (так заявлено в спеке), а домен целиком
+ * русскоязычный: кириллица в UTF-8 занимает вдвое больше места, чем единиц
+ * длины JS-строки (UTF-16). Мерить через .length — значит пропускать почти
+ * вдвое больше данных, чем обещано.
  */
 function fit(props) {
   const keys = Object.keys(props);
-  while (keys.length && JSON.stringify(props).length > MAX_PROPS_BYTES) {
+  while (keys.length && byteSize(props) > MAX_PROPS_BYTES) {
     delete props[keys.pop()];
   }
   return props;
