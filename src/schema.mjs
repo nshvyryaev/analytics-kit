@@ -63,7 +63,17 @@ export const EVENTS = {
 
   // Покупки
   store_open: { from: ['hint_blocked', 'menu', 'level_end'], wallet: 'int', ms_catalog: 'int' },
-  store_item_select: { item_id: 'str', price: 'num', currency: 'str' },
+  /**
+   * Цена лежит в двух видах не ради дублирования, а потому что площадки
+   * отдают её по-разному, и это не унифицировать на клиенте без разбора
+   * локализованного текста регулярками. ВКонтакте отдаёт число с валютой
+   * (голоса/ОКи) — `price`/`currency` заполнены и пригодны для арифметики
+   * (сумма, средний чек). Яндекс отдаёт только готовую строку вида «19 ₽» —
+   * для неё `price_text` обязателен и есть у всех площадок; `price`/`currency`
+   * там просто не приходят, и разбирать строку в число значило бы гадать по
+   * формату конкретной локали, который может измениться без нашего ведома.
+   */
+  store_item_select: { item_id: 'str', price: 'num', currency: 'str', price_text: 'str' },
   purchase_result: {
     item_id: 'str', outcome: ['purchased', 'cancelled', 'unavailable', 'timeout'], ms: 'int',
   },
