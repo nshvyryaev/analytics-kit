@@ -75,17 +75,47 @@ test('отсечка убирает сырьё, но оставляет игро
   db.close();
 });
 
-test('счётчик побед у игрока переживает отсечку сырья', () => {
-  // Регрессия: пересчёт levels_won прямо из events без ограничения по дню
-  // после отсечки старых суток молча уменьшал счётчик. levels_won должен
-  // читаться из activity, которая отсечку переживает, и потому не меняться.
-  const db = filled();
-  rollup(db, DAY);
-  const before = db.prepare('SELECT levels_won FROM subjects WHERE subject_id = ?').get('ПС1').levels_won;
-  assert.equal(before, 1);
-  prune(db, { before: '2026-10-10' });
-  const after = db.prepare('SELECT levels_won FROM subjects WHERE subject_id = ?').get('ПС1').levels_won;
-  assert.equal(after, before);
+test('счётчик побед не проседает при повторной свёртке после отсечки старого дня', () => {
+  // Регрессия: прежний пересчёт levels_won читал COUNT(*) прямо из events без
+  // ограничения по дню. Это не ловится свёрткой одного дня и уж тем более не
+  // ловится вызовом prune() самим по себе — prune никогда не трогал subjects,
+  // поэтому "свернуть — отсечь — проверить, что не изменилось" проходит
+  // одинаково что на старом, что на новом коде и ничего не доказывает. Баг
+  // проявляется только на СЛЕДУЮЩЕЙ свёртке ПОСЛЕ отсечки: пересчёт берёт
+  // COUNT по уже урезанному events и теряет победы из отсечённых дней.
+  const OLD_DAY = '2026-08-01';
+  const NEW_DAY = '2026-09-09';
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  const session = (id, day) => ({
+    session_id: id, app: 'word-chain', subject_id: 'ПС1', anon_subject: 'ПС1',
+    key_version: 1, platform: 'vk', verified: 1, app_version: 'abc', language: 'ru',
+    os: 'android', mobile: 1, screen: 'sm', entry: 'direct', day,
+    started_at: 1000, last_seen_at: 1000,
+  });
+  sink.session(session('старая', OLD_DAY));
+  sink.session(session('свежая', NEW_DAY));
+  sink.events([
+    { session_id: 'старая', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: OLD_DAY, props: '{"outcome":"solved"}', known: 1 },
+  ]);
+  sink.events([
+    { session_id: 'свежая', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: NEW_DAY, props: '{"outcome":"solved"}', known: 1 },
+  ]);
+
+  // 1-2. Победа в старый день и победа в свежий — сворачиваем оба дня.
+  rollup(db, OLD_DAY);
+  rollup(db, NEW_DAY);
+  const total = () => db.prepare('SELECT levels_won FROM subjects WHERE subject_id = ?').get('ПС1').levels_won;
+  assert.equal(total(), 2);
+
+  // 3. Отсекаем сырьё так, чтобы старый день ушёл, а свежий остался.
+  const removed = prune(db, { before: NEW_DAY });
+  assert.ok(removed.events > 0);
+
+  // 4-5. Свёртка свежего дня ЕЩЁ РАЗ, уже после отсечки старого — счётчик
+  // должен остаться 2, а не просесть до 1 из-за потери отсечённой победы.
+  rollup(db, NEW_DAY);
+  assert.equal(total(), 2);
   db.close();
 });
 

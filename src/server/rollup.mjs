@@ -78,15 +78,22 @@ export function rollup(db, day) {
        GROUP BY s.app, s.platform, e.name, e.props`,
     ).all(day);
 
+    // Составной ключ Map — JSON.stringify массива частей, а не склейка со
+    // строковым разделителем. У склейки нет безопасного разделителя: печатный
+    // символ (пробел, двоеточие) может встретиться в самих данных и молча
+    // срезать хвост ключа при разборе, а непечатаемый control-символ уже
+    // однажды попал в этот файл буквальным байтом вместо escape-последовательности
+    // в исходнике. JSON.stringify/JSON.parse однозначны по построению и не
+    // нуждаются ни в том, ни в другом — не возвращать это к склейке.
     const totals = new Map();
     for (const row of counted) {
       const outcome = outcomeOf(row.name, row.props);
       const metric = outcome ? `${row.name}:${outcome}` : row.name;
-      const key = `${row.app} ${row.platform} ${metric}`;
+      const key = JSON.stringify([row.app, row.platform, metric]);
       totals.set(key, (totals.get(key) ?? 0) + row.n);
     }
     for (const [key, value] of totals) {
-      const [app, platform, metric] = key.split(' ');
+      const [app, platform, metric] = JSON.parse(key);
       put.run(app, day, platform, metric, value);
       written += 1;
     }
@@ -118,7 +125,7 @@ export function rollup(db, day) {
 
     const perSubject = new Map();
     const bucketOf = (app, subjectId) => {
-      const key = `${app} ${subjectId}`;
+      const key = JSON.stringify([app, subjectId]);
       let entry = perSubject.get(key);
       if (!entry) {
         entry = { levels_won: 0, purchases: 0, hints_bought: 0 };
@@ -155,7 +162,7 @@ export function rollup(db, day) {
        WHERE app = ? AND day = ? AND subject_id = ?`,
     );
     for (const row of activeToday) {
-      const entry = perSubject.get(`${row.app} ${row.subject_id}`)
+      const entry = perSubject.get(JSON.stringify([row.app, row.subject_id]))
         ?? { levels_won: 0, purchases: 0, hints_bought: 0 };
       setDaily.run(entry.levels_won, entry.purchases, entry.hints_bought, row.app, day, row.subject_id);
     }
