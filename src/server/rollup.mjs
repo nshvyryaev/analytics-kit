@@ -198,7 +198,23 @@ export function prune(db, { before }) {
     // Сначала events, потом sessions: у events внешний ключ на sessions, и
     // при foreign_keys = ON удаление сессии раньше её событий упадёт.
     const events = db.prepare('DELETE FROM events WHERE day < ?').run(before).changes;
-    const sessions = db.prepare('DELETE FROM sessions WHERE day < ?').run(before).changes;
+    // Сессию нельзя удалять просто по дате её начала. `sessions.day` — день,
+    // когда сессия ОТКРЫЛАСЬ, а не когда она в последний раз писала события:
+    // серверная псевдосессия (до этой правки) заводилась раз на процесс и
+    // копила события месяцами, а обычная клиентская сессия может писать
+    // события ещё какое-то время после полуночи, уже в следующий день. Если
+    // у такой сессии day старше границы, а событие свежее — WHERE day < ?
+    // выберет сессию на удаление, хотя у неё остались события, которые
+    // отсечка выше не тронула (у них day >= before). Итог — либо падение на
+    // внешнем ключе (foreign_keys = ON), либо (без него) осиротевшие
+    // события без родителя. Поэтому удаляем только сессии, у которых после
+    // отсечки событий не осталось вовсе: долгоживущая сессия проживёт ровно
+    // до тех пор, пока не отсекутся последние её события.
+    const sessions = db.prepare(
+      `DELETE FROM sessions WHERE day < ? AND NOT EXISTS (
+         SELECT 1 FROM events WHERE events.session_id = sessions.session_id
+       )`,
+    ).run(before).changes;
     db.exec('COMMIT');
     return { events, sessions };
   } catch (error) {

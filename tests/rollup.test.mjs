@@ -119,6 +119,42 @@ test('счётчик побед не проседает при повторно�
   db.close();
 });
 
+test('отсечка не роняется на долгоживущей сессии со свежими событиями', () => {
+  // Воспроизводит гарантию, а не край: серверная псевдосессия (до фикса
+  // на суточный ключ) заводится раз на процесс с фиксированным `day` и
+  // пишет события каждый день, пока процесс жив; то же с любой клиентской
+  // сессией, начатой до полуночи. У такой сессии `day` уходит за границу
+  // отсечки, а события — нет: наивное "DELETE events WHERE day < before,
+  // потом DELETE sessions WHERE day < before" пытается удалить сессию, на
+  // которую всё ещё ссылаются свежие события, и падает на внешнем ключе
+  // (PRAGMA foreign_keys = ON). Тест должен падать на нынешнем коде.
+  const OLD_DAY = '2026-08-01';
+  const CUTOFF = '2026-09-01';
+  const FRESH_DAY = '2026-09-05';
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  sink.session({
+    session_id: 'долгая', app: 'word-chain', subject_id: 'server', anon_subject: 'server',
+    key_version: 1, platform: 'server', verified: 1, app_version: null, language: null,
+    os: null, mobile: null, screen: null, entry: 'server', day: OLD_DAY,
+    started_at: 1000, last_seen_at: 1000,
+  });
+  sink.events([
+    { session_id: 'долгая', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: OLD_DAY, props: '{"outcome":"solved"}', known: 1 },
+  ]);
+  sink.events([
+    { session_id: 'долгая', seq: 2, name: 'level_end', ts: 2, received_at: 2, day: FRESH_DAY, props: '{"outcome":"solved"}', known: 1 },
+  ]);
+
+  const removed = prune(db, { before: CUTOFF });
+
+  assert.equal(removed.events, 1);
+  assert.equal(removed.sessions, 0);
+  assert.ok(db.prepare('SELECT 1 AS found FROM sessions WHERE session_id = ?').get('долгая'));
+  assert.ok(db.prepare('SELECT 1 AS found FROM events WHERE session_id = ? AND seq = 2').get('долгая'));
+  db.close();
+});
+
 test('незнакомое событие не подделывает метрику по исходу', () => {
   // Событие с именем, буквально равным составному ключу метрики, но пришедшее
   // как незнакомое (known = 0), не должно сливаться с настоящей агрегацией

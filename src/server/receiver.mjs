@@ -34,9 +34,15 @@ export function createReceiver({
   // Счётчик событий на сессию держится в памяти: он нужен только чтобы
   // остановить поток, а после перезапуска поток и так начнётся заново.
   const counts = new Map();
-  // Серверные события живут в псевдосессии — по одной на приложение. Так они
-  // ложатся в ту же таблицу и считаются теми же запросами, а не заводят
-  // второй путь записи ради семи событий в сутки.
+  // Серверные события живут в псевдосессии — по одной на приложение НА ДЕНЬ
+  // (ключ кэша — app + day, а не только app). Так они ложатся в ту же
+  // таблицу и считаются теми же запросами, а не заводят второй путь записи
+  // ради семи событий в сутки. Ключ только по app держал бы одну и ту же
+  // сессию месяцами, пока жив процесс: у неё был бы старый sessions.day, но
+  // события каждый день — свежее, и prune() (см. rollup.mjs) не смог бы
+  // удалить такую сессию никогда, сколько бы дней ни прошло. С ключом на
+  // день каждая полночь заводит новую сессию, а вчерашняя отсекается сама,
+  // как только отсекутся её события.
   const serverSessions = new Map();
 
   /**
@@ -54,16 +60,18 @@ export function createReceiver({
   }
 
   function serverSession(app) {
-    let id = serverSessions.get(app);
+    const at = now();
+    const day = dayKey(at);
+    const cacheKey = `${app}#${day}`;
+    let id = serverSessions.get(cacheKey);
     if (id) return id;
     id = token();
-    const at = now();
     try {
       sink.session({
         session_id: id, app, subject_id: 'server', anon_subject: 'server',
         key_version: keyVersion, platform: 'server', verified: 1,
         app_version: null, language: null, os: null, mobile: null, screen: null,
-        entry: 'server', day: dayKey(at), started_at: at, last_seen_at: at,
+        entry: 'server', day, started_at: at, last_seen_at: at,
       });
     } catch (error) {
       // Как и с клиентскими событиями: сбой хранилища не должен ронять
@@ -72,7 +80,7 @@ export function createReceiver({
       console.error('[аналитика] серверная сессия не создана', error);
       return null;
     }
-    serverSessions.set(app, id);
+    serverSessions.set(cacheKey, id);
     return id;
   }
 

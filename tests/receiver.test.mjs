@@ -110,3 +110,30 @@ test('серверное событие пишется без клиентско
   assert.equal(session.platform, 'server');
   db.close();
 });
+
+test('серверная псевдосессия заводится заново на следующий день', () => {
+  // Без суточного ключа одна серверная сессия копит события месяцами и
+  // никогда не отсекается prune()-ом (см. rollup.test.mjs). Здесь проверяем
+  // именно ключевание кэша: на новый день — новый session_id.
+  let clock = Date.parse('2026-09-09T12:00:00Z');
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  const receiver = createReceiver({ sink, key: KEY, apps: APPS, verify: () => ({ ok: false }), now: () => clock });
+
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 5 });
+  const first = db.prepare("SELECT session_id, day FROM sessions WHERE platform = 'server'").all();
+  assert.equal(first.length, 1);
+  assert.equal(first[0].day, '2026-09-09');
+
+  // Второе событие в тот же день переиспользует ту же сессию.
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 5 });
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE platform = 'server'").get().n, 1);
+
+  clock = Date.parse('2026-09-10T00:30:00Z');
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 5 });
+  const all = db.prepare("SELECT session_id, day FROM sessions WHERE platform = 'server' ORDER BY day").all();
+  assert.equal(all.length, 2);
+  assert.equal(all[1].day, '2026-09-10');
+  assert.notEqual(all[0].session_id, all[1].session_id);
+  db.close();
+});
