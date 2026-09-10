@@ -1,6 +1,6 @@
 {
   "name": "analytics-kit",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "Транспорт, приёмник и хранилище продуктовых событий. Без зависимостей.",
   "type": "module",
   "engines": { "node": ">=22" },

@@ -125,6 +125,41 @@ test('восстановленная очередь обрезается по ma
   assert.deepEqual(batch.body.e.map((e) => e.n), ['b', 'c', 'до-старта']);
 });
 
+test('раннее событие до start() перенумеровывается и не задваивает seq восстановленных', async () => {
+  const h = harness();
+  // Сохранённая с прошлого запуска очередь — например, прошлый запуск не
+  // открыл сессию (сбор был выключен, сервер не ответил, сеть упала) и
+  // весь хвост так и остался несожранным.
+  h.store.set('analytics_queue', JSON.stringify({
+    seq: 3,
+    queue: [
+      { q: 1, n: 'level_start', t: 1 },
+      { q: 2, n: 'level_end', t: 2 },
+      { q: 3, n: 'session_end', t: 3 },
+    ],
+  }));
+  const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', ...h });
+  // До start() — например, событие готовности игры.
+  client.track('app_ready', { ms: 0 });
+  await client.start(info);
+  await client.flush();
+  const batch = h.sent.find((r) => !r.url.endsWith('/session'));
+  const seqs = batch.body.e.map((e) => e.q);
+  // Номера не повторяются — иначе INSERT OR IGNORE на приёмнике молча
+  // отбросит второе событие с тем же (session_id, seq).
+  assert.equal(new Set(seqs).size, seqs.length);
+  // Раннее событие никуда не делось.
+  assert.ok(batch.body.e.some((e) => e.n === 'app_ready'));
+  // Восстановленные события сохранили свои прежние номера — их защита от
+  // задвоения не сломана перенумерацией.
+  assert.deepEqual(
+    batch.body.e.filter((e) => e.n !== 'app_ready').map((e) => e.q),
+    [1, 2, 3],
+  );
+  // Раннее событие получило номер, продолжающий восстановленный счётчик.
+  assert.equal(batch.body.e.find((e) => e.n === 'app_ready').q, 4);
+});
+
 /**
  * Пути по умолчанию (`sendBeacon`/`fetch` без подстановки `send`) — то
  * единственное, что реально работает в бою: все остальные тесты подставляют
