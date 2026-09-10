@@ -10,6 +10,13 @@
  * Проверку подписи приёмник не делает сам: она своя у каждой площадки, а
  * пакету положено не знать про ВКонтакте ничего. Функция `verify` внедряется
  * снаружи.
+ *
+ * У сервера тоже бывают события без клиента: начисление после платёжного
+ * колбэка, отказ по несошедшейся подписи. Для них `track()` заводит
+ * псевдосессию — общую на приложение (личность неизвестна) или, если вызывающий
+ * код знает игрока (площадка + id из уже проверенного платёжного уведомления),
+ * привязанную к нему псевдосессию на день, псевдонимизированную так же, как у
+ * клиента.
  */
 import { randomBytes } from 'node:crypto';
 
@@ -34,16 +41,26 @@ export function createReceiver({
   // Счётчик событий на сессию держится в памяти: он нужен только чтобы
   // остановить поток, а после перезапуска поток и так начнётся заново.
   const counts = new Map();
-  // Серверные события живут в псевдосессии — по одной на приложение НА ДЕНЬ
-  // (ключ кэша — app + day, а не только app). Так они ложатся в ту же
-  // таблицу и считаются теми же запросами, а не заводят второй путь записи
-  // ради семи событий в сутки. Ключ только по app держал бы одну и ту же
-  // сессию месяцами, пока жив процесс: у неё был бы старый sessions.day, но
-  // события каждый день — свежее, и prune() (см. rollup.mjs) не смог бы
-  // удалить такую сессию никогда, сколько бы дней ни прошло. С ключом на
-  // день каждая полночь заводит новую сессию, а вчерашняя отсекается сама,
-  // как только отсекутся её события.
-  const serverSessions = new Map();
+  // Счётчики серверных псевдосессий (общей и по игрокам) — ОТДЕЛЬНАЯ карта, а
+  // не запись в `counts` вместе с клиентскими. Причина: `counts` вытесняет
+  // старейшую запись по переполнению `MAX_COUNTS_ENTRIES`, а порядок
+  // вытеснения у `Map` — порядок вставки. Серверная псевдосессия заводится
+  // ПЕРВОЙ в жизни процесса (до первого клиентского запроса) — значит именно
+  // она вытесняется первой, как только поток клиентских сессий наберёт
+  // потолок. После вытеснения её счётчик в `counts` исчезает, track() снова
+  // начинает нумерацию `seq` с единицы, а `INSERT OR IGNORE` по ключу
+  // (session_id, seq) в sqlite.mjs молча отбрасывает все начисления и отказы,
+  // чей номер уже занят прежними, — теряется ровно столько событий, сколько
+  // их было до вытеснения. Серверных псевдосессий в сутки — единицы (общая
+  // плюс по одной на купившего игрока), так что отдельная карта для них не
+  // нуждается в потолке по размеру вовсе — ей просто неоткуда раздуться от
+  // потока чужих запросов. Но жить вечным процессом ей тоже нельзя: без
+  // чистки по дате за год набегут сотни устаревших дневных ключей. Чистим их
+  // сами при каждом обращении (см. pruneServerState) — сессии всё равно
+  // ключуются по дню и назавтра уже не переиспользуются, так что держать
+  // вчерашние записи незачем.
+  const serverSessions = new Map(); // cacheKey -> { id, day }
+  const serverCounts = new Map(); // session_id -> seq
 
   /**
    * Пишет счётчик событий сессии, вытесняя старейшую запись при переполнении
@@ -59,20 +76,29 @@ export function createReceiver({
     counts.set(id, value);
   }
 
-  function serverSession(app) {
-    const at = now();
-    const day = dayKey(at);
-    const cacheKey = `${app}#${day}`;
-    let id = serverSessions.get(cacheKey);
-    if (id) return id;
-    id = token();
+  /** Убирает из карты серверных псевдосессий всё, что не сегодня. */
+  function pruneServerState(today) {
+    for (const [cacheKey, entry] of serverSessions) {
+      if (entry.day !== today) {
+        serverSessions.delete(cacheKey);
+        serverCounts.delete(entry.id);
+      }
+    }
+  }
+
+  /**
+   * Заводит (или переиспользует из кэша) серверную псевдосессию по ключу
+   * `cacheKey` на день `day`, вызывая `buildRow(id)` для первой записи.
+   * Общая точка для «общей» серверной сессии на приложение и «привязанной»
+   * на игрока — обе живут по одному правилу: одна сессия на ключ в сутки.
+   */
+  function ensureServerSession(cacheKey, day, buildRow) {
+    pruneServerState(day);
+    const cached = serverSessions.get(cacheKey);
+    if (cached) return cached.id;
+    const id = token();
     try {
-      sink.session({
-        session_id: id, app, subject_id: 'server', anon_subject: 'server',
-        key_version: keyVersion, platform: 'server', verified: 1,
-        app_version: null, language: null, os: null, mobile: null, screen: null,
-        entry: 'server', day, started_at: at, last_seen_at: at,
-      });
+      sink.session(buildRow(id));
     } catch (error) {
       // Как и с клиентскими событиями: сбой хранилища не должен ронять
       // процесс, который держит платежи. Без записанной сессии писать
@@ -80,8 +106,38 @@ export function createReceiver({
       console.error('[аналитика] серверная сессия не создана', error);
       return null;
     }
-    serverSessions.set(cacheKey, id);
+    serverSessions.set(cacheKey, { id, day });
     return id;
+  }
+
+  function serverSession(app) {
+    const at = now();
+    const day = dayKey(at);
+    return ensureServerSession(`${app}#${day}`, day, (id) => ({
+      session_id: id, app, subject_id: 'server', anon_subject: 'server',
+      key_version: keyVersion, platform: 'server', verified: 1,
+      app_version: null, language: null, os: null, mobile: null, screen: null,
+      entry: 'server', day, started_at: at, last_seen_at: at,
+    }));
+  }
+
+  /**
+   * Серверная псевдосессия, привязанная к конкретному игроку за этот день —
+   * та же логика псевдонимизации, что и у клиентской сессии (playerSubject),
+   * чтобы событие легло на настоящего игрока, а не на общего «server».
+   * Покупок мало, поэтому «сессия на покупающего игрока в сутки» приемлема
+   * по объёму — это не поток, который нужно вытеснять.
+   */
+  function playerServerSession(app, platform, playerId) {
+    const at = now();
+    const day = dayKey(at);
+    const subjectId = playerSubject(platform, playerId, key);
+    return ensureServerSession(`${app}#${day}#${subjectId}`, day, (id) => ({
+      session_id: id, app, subject_id: subjectId, anon_subject: subjectId,
+      key_version: keyVersion, platform, verified: 1,
+      app_version: null, language: null, os: null, mobile: null, screen: null,
+      entry: 'server', day, started_at: at, last_seen_at: at,
+    }));
   }
 
   return {
@@ -178,15 +234,35 @@ export function createReceiver({
       return { status: 204 };
     },
 
-    /** Событие, о котором знает только сервер: начисление, отказ по подписи. */
-    track(app, name, props) {
+    /**
+     * Событие, о котором знает только сервер: начисление, отказ по подписи.
+     *
+     * Необязательный четвёртый параметр `identity` — `{ platform, playerId }`
+     * — привязывает событие к настоящему игроку (например,
+     * `purchase_credited`, чтобы `hints_bought` в свёртке считался на живого
+     * игрока, а не на фиктивного «server»: rollup.mjs берёт подневные
+     * счётчики по `subject_id` сессии, и без привязки все покупки лежали на
+     * одном псевдонимном игроке). Когда `identity` не передан или неполон
+     * (нет платформы или id) — поведение прежнее, общая псевдосессия
+     * `subject_id = 'server'`: так и остаётся `payment_rejected` — по
+     * несошедшейся подписи сервер не знает, какой игрок стоит за запросом.
+     */
+    track(app, name, props, identity) {
       if (!allowed.has(app)) return;
-      const id = serverSession(app);
+      const platform = typeof identity?.platform === 'string' && identity.platform
+        ? bounded(identity.platform, 16)
+        : null;
+      const playerId = typeof identity?.playerId === 'string' || typeof identity?.playerId === 'number'
+        ? String(identity.playerId)
+        : null;
+      const id = platform && playerId
+        ? playerServerSession(app, platform, playerId)
+        : serverSession(app);
       if (!id) return;
       const at = now();
       const { known, props: clean } = validate(name, props);
-      const seq = (counts.get(id) ?? 0) + 1;
-      bumpCount(id, seq);
+      const seq = (serverCounts.get(id) ?? 0) + 1;
+      serverCounts.set(id, seq);
       try {
         sink.events([{
           session_id: id, seq, name, ts: at, received_at: at,

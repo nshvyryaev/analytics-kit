@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createReceiver } from '../src/server/receiver.mjs';
 import { createSqliteSink, openAnalyticsDb } from '../src/server/sinks/sqlite.mjs';
+import { playerSubject } from '../src/server/identity.mjs';
 
 const KEY = 'ключ';
 const APPS = ['word-chain'];
@@ -135,5 +136,76 @@ test('серверная псевдосессия заводится занов�
   assert.equal(all.length, 2);
   assert.equal(all[1].day, '2026-09-10');
   assert.notEqual(all[0].session_id, all[1].session_id);
+  db.close();
+});
+
+test('серверные счётчики не делят карту с клиентскими: поток клиентских сессий не топит серверное событие', () => {
+  // Регрессия I3: до фикса счётчик серверной псевдосессии жил в общей карте
+  // `counts` вместе с клиентскими. Карта вытесняет самую старую запись по
+  // переполнению потолка (MAX_COUNTS_ENTRIES = 10 000), а серверная
+  // псевдосессия заводится ПЕРВОЙ в жизни процесса — значит вытеснялась
+  // первой. После вытеснения её seq в track() снова начинался с 1, и
+  // `INSERT OR IGNORE` по (session_id, seq) в sqlite.mjs тихо отбрасывал
+  // второе серверное событие как повтор первого.
+  const { db, receiver } = setup();
+
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 5 });
+
+  for (let i = 0; i < 10_000; i += 1) {
+    const { body } = receiver.session({ app: 'word-chain', anon_id: `а${i}`, ctx });
+    receiver.collect({ s: body.session_id, sent_at: 10_000, e: [{ q: 1, n: 'pause', t: 10_000, p: { ms: 1 } }] });
+  }
+
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 5 });
+  const rows = db.prepare(
+    "SELECT e.seq AS seq FROM events e JOIN sessions s ON s.session_id = e.session_id WHERE s.platform = 'server' ORDER BY e.seq",
+  ).all();
+  assert.deepEqual(rows.map((row) => row.seq), [1, 2]);
+  db.close();
+});
+
+test('событие с привязкой к игроку ложится в его сессию, а не в общую "server"', () => {
+  const { db, receiver } = setup();
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', item_id: 'hints-10', hints: 10 }, { platform: 'vk', playerId: '42' });
+
+  const row = db.prepare("SELECT session_id FROM events WHERE name = 'purchase_credited'").get();
+  const session = db.prepare('SELECT subject_id, anon_subject, platform FROM sessions WHERE session_id = ?').get(row.session_id);
+  assert.notEqual(session.subject_id, 'server');
+  assert.equal(session.platform, 'vk');
+  // Тот же игрок псевдонимизируется той же функцией, что и клиентские сессии.
+  assert.equal(session.subject_id, playerSubject('vk', '42', KEY));
+  assert.equal(session.anon_subject, session.subject_id);
+  db.close();
+});
+
+test('тот же игрок в тот же день переиспользует свою серверную сессию', () => {
+  const { db, receiver } = setup();
+  const identity = { platform: 'vk', playerId: '42' };
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 10 }, identity);
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 5 }, identity);
+
+  const sessions = db.prepare("SELECT session_id FROM sessions WHERE platform = 'vk'").all();
+  assert.equal(sessions.length, 1);
+  const events = db.prepare('SELECT seq FROM events WHERE session_id = ? ORDER BY seq').all(sessions[0].session_id);
+  assert.deepEqual(events.map((e) => e.seq), [1, 2]);
+  db.close();
+});
+
+test('разные игроки в один день получают разные серверные сессии', () => {
+  const { db, receiver } = setup();
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 10 }, { platform: 'vk', playerId: '1' });
+  receiver.track('word-chain', 'purchase_credited', { source: 'vk', hints: 10 }, { platform: 'vk', playerId: '2' });
+
+  const subjects = db.prepare("SELECT DISTINCT subject_id FROM sessions WHERE platform = 'vk'").all();
+  assert.equal(subjects.length, 2);
+  db.close();
+});
+
+test('событие без привязки по-прежнему идёт на общую серверную псевдосессию', () => {
+  const { db, receiver } = setup();
+  receiver.track('word-chain', 'payment_rejected', { source: 'vk', reason: 'bad_signature' });
+  const row = db.prepare("SELECT subject_id, platform FROM sessions WHERE platform = 'server'").get();
+  assert.ok(row);
+  assert.equal(row.subject_id, 'server');
   db.close();
 });
