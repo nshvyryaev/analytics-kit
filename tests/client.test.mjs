@@ -160,6 +160,32 @@ test('раннее событие до start() перенумеровывает�
   assert.equal(batch.body.e.find((e) => e.n === 'app_ready').q, 4);
 });
 
+test('сохранённый seq меньше максимального номера в очереди — счётчик не отстаёт', async () => {
+  const h = harness();
+  // Испорченное сохранение / обрыв записи / очередь от прежней версии
+  // клиента: seq и очередь пишутся вместе, но разошлись. В очереди уже
+  // лежит номер 3, а сохранённый счётчик отстал и равен 1.
+  h.store.set('analytics_queue', JSON.stringify({
+    seq: 1,
+    queue: [
+      { q: 1, n: 'level_start', t: 1 },
+      { q: 2, n: 'level_end', t: 2 },
+      { q: 3, n: 'session_end', t: 3 },
+    ],
+  }));
+  const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', ...h });
+  client.track('app_ready', { ms: 0 });
+  await client.start(info);
+  await client.flush();
+  const batch = h.sent.find((r) => !r.url.endsWith('/session'));
+  const seqs = batch.body.e.map((e) => e.q);
+  // Если бы счётчик взяли из отставшего сохранённого значения как есть,
+  // раннее событие получило бы номер 2 — тот же, что и у восстановленного
+  // level_end, и приёмник молча отбросил бы дубликат.
+  assert.equal(new Set(seqs).size, seqs.length);
+  assert.equal(batch.body.e.find((e) => e.n === 'app_ready').q, 4);
+});
+
 /**
  * Пути по умолчанию (`sendBeacon`/`fetch` без подстановки `send`) — то
  * единственное, что реально работает в бою: все остальные тесты подставляют
