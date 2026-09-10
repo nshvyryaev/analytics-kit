@@ -29,6 +29,22 @@ test('значение вне перечисления отбрасываетс�
   assert.equal('mode' in out.props, false);
 });
 
+test('длина слова вне диапазона отбрасывается, допустимая — проходит', () => {
+  // length используется в имени метрики свёртки (rollup.mjs) — без
+  // диапазона число строк в daily (таблице без ретеншена) определял бы
+  // клиент, просто присылая произвольные числа.
+  const tooShort = validate('level_start', { mode: 'daily', length: 2 });
+  assert.equal('length' in tooShort.props, false);
+  const tooLong = validate('level_end', { outcome: 'solved', length: 9 });
+  assert.equal('length' in tooLong.props, false);
+  const okShort = validate('level_start', { mode: 'daily', length: 3 });
+  assert.equal(okShort.props.length, 3);
+  const okLong = validate('level_end', { outcome: 'solved', length: 8 });
+  assert.equal(okLong.props.length, 8);
+  const notInt = validate('level_start', { mode: 'daily', length: 5.5 });
+  assert.equal('length' in notInt.props, false);
+});
+
 test('длинная строка обрезается', () => {
   const out = validate('app_error', { where: 'x'.repeat(200), fatal: true });
   assert.equal(out.props.where.length, MAX_STR);

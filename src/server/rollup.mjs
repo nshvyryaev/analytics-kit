@@ -22,23 +22,44 @@
 /** События, у которых исход важнее самого факта (для подневных счётчиков игрока). */
 const BY_OUTCOME = { level_end: 'outcome', ad_result: 'outcome', purchase_result: 'outcome' };
 
+const isOutcome = (value) => typeof value === 'string';
 /**
- * Измерения имени метрики — по событию, явный и короткий список полей, а не
- * рефлексия по всей схеме события из schema.mjs. У level_end кроме outcome и
- * length есть ещё moves, chain, rejects, hints, ms, streak — включи их сюда,
- * и метрика взорвалась бы по мощности (moves/chain вообще массивы
- * произвольной длины) либо просто перестала бы что-то агрегировать: строка
- * `daily` обязана оставаться редкой сводкой, а не сырьём под другим именем.
- * Длины слов у нас от трёх до восьми, исходов — единицы, так что
- * `level_end` × length × outcome даёт до полусотни строк в сутки на
- * (app, platform) — не взрыв. Расширять список — осознанное решение, а не
- * побочный эффект появления нового поля в словаре событий.
+ * Длина слова — свой, отдельно заданный диапазон, НЕ импортированный из
+ * WORD_LENGTH в schema.mjs (см. комментарий там). Словарь ограничивает, что
+ * можно ЗАПИСАТЬ, эта проверка — что можно превратить в ИМЯ МЕТРИКИ строки
+ * `daily`, у которой нет срока хранения. Если бы обе проверки читали одну
+ * константу, смягчение диапазона в словаре (ради нового игрового режима,
+ * например) тихо смягчило бы и потолок мощности здесь — а его в этот момент
+ * никто не пересматривал. Отдельная копия — то, что заставляет пересмотреть
+ * оба места сознательно.
+ */
+const isWordLength = (value) => Number.isInteger(value) && value >= 3 && value <= 8;
+
+/**
+ * Измерения имени метрики — по событию, явный и короткий список
+ * (поле, проверка типа/диапазона), а не рефлексия по всей схеме события из
+ * schema.mjs. У level_end кроме outcome и length есть ещё moves, chain,
+ * rejects, hints, ms, streak — включи их сюда, и метрика взорвалась бы по
+ * мощности (moves/chain вообще массивы произвольной длины) либо просто
+ * перестала бы что-то агрегировать: строка `daily` обязана оставаться редкой
+ * сводкой, а не сырьём под другим именем. Длины слов у нас от трёх до
+ * восьми, исходов — единицы, так что `level_end` × length × outcome даёт до
+ * полусотни строк в сутки на (app, platform) — не взрыв. Расширять список —
+ * осознанное решение, а не побочный эффект появления нового поля в словаре
+ * событий.
+ *
+ * Проверка есть у каждого измерения, а не только «значение присутствует»:
+ * `length` из уже провалидированных свойств обязан быть 3..8, `outcome` —
+ * строкой. Без диапазона число строк `daily` (таблицы без ретеншена)
+ * фактически задавал бы клиент, просто присылая произвольные значения —
+ * словарь в schema.mjs это уже отсекает при записи, но `daily` не должен
+ * зависеть от того, что словарь не смягчат в будущем без учёта этого места.
  */
 const DIMENSIONS = {
-  level_start: ['length'],
-  level_end: ['outcome', 'length'],
-  ad_result: ['outcome'],
-  purchase_result: ['outcome'],
+  level_start: [['length', isWordLength]],
+  level_end: [['outcome', isOutcome], ['length', isWordLength]],
+  ad_result: [['outcome', isOutcome]],
+  purchase_result: [['outcome', isOutcome]],
 };
 
 /**
@@ -51,24 +72,29 @@ function outcomeOf(name, parsedProps) {
   const field = BY_OUTCOME[name];
   if (!field) return undefined;
   const value = parsedProps[field];
-  return typeof value === 'string' ? value : undefined;
+  return isOutcome(value) ? value : undefined;
 }
 
 /**
- * Имя метрики: событие плюс значения его измерений по порядку. Измерение,
- * которого нет в присланных свойствах (клиент мог не заполнить поле),
- * пропускается, а не подставляется заглушкой — так `level_end` без length
- * всё равно попадёт в `level_end:solved`, а не потеряется вовсе.
+ * Имя метрики: событие плюс значения ВСЕХ его измерений по порядку — либо
+ * ничего, кроме голого имени события. Частичный суффикс неоднозначен: если
+ * бы `level_end` без исхода (клиент мог не прислать его) давал
+ * "level_end:6", это неотличимо по форме от «второго измерения нет, значит
+ * 6 — единственное» — регулярный запрос не может понять, какое измерение
+ * выпало. Поэтому либо все измерения на месте и прошли свою проверку
+ * (isWordLength/isOutcome), либо метрика — просто `name`, без единого
+ * суффикса.
  */
 function metricName(name, parsedProps) {
   const fields = DIMENSIONS[name];
   if (!fields) return name;
-  const parts = [name];
-  for (const field of fields) {
+  const parts = [];
+  for (const [field, isValid] of fields) {
     const value = parsedProps[field];
-    if (value !== undefined && value !== null) parts.push(String(value));
+    if (!isValid(value)) return name;
+    parts.push(String(value));
   }
-  return parts.join(':');
+  return [name, ...parts].join(':');
 }
 
 export function rollup(db, day) {
@@ -83,10 +109,23 @@ export function rollup(db, day) {
 
     // DAU — по игрокам, не по сессиям: один игрок с тремя сессиями за день
     // должен дать dau = 1, а не 3. Сессии считаются отдельной метрикой рядом.
+    //
+    // entry = 'server' исключён намеренно: это псевдосессии track() —
+    // общая (subject_id = 'server') и привязанная к игроку по площадке
+    // покупки (receiver.mjs, playerServerSession). Игрок мог в этот день
+    // вовсе не открывать игру и только прислать отложенный платёжный
+    // колбэк — засчитывать это как присутствие в аудитории нельзя: dau и
+    // sessions завышались бы постоянно, а `daily` переживает отсечку сырья,
+    // так что искажение не самоисправляется. Подневные счётчики (activity)
+    // такую сессию всё равно видят — см. sqlite.mjs, markActivity.
+    // `entry` — NULLABLE (клиент мог не прислать `ctx.entry`), поэтому
+    // сравнение — `IS NOT`, а не `!=`: у `!=` сравнение с NULL даёт NULL
+    // (то есть "неизвестно"), и WHERE отбросил бы такие строки заодно с
+    // серверными — `IS NOT` в SQLite NULL-safe и оставляет их в аудитории.
     const audience = db.prepare(
       `SELECT s.app AS app, s.platform AS platform,
               COUNT(DISTINCT s.subject_id) AS dau, COUNT(*) AS sessions
-       FROM sessions s WHERE s.day = ? GROUP BY s.app, s.platform`,
+       FROM sessions s WHERE s.day = ? AND s.entry IS NOT 'server' GROUP BY s.app, s.platform`,
     ).all(day);
     for (const row of audience) {
       put.run(row.app, day, row.platform, 'dau', row.dau);

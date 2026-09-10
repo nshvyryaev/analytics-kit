@@ -17,11 +17,11 @@ function filled() {
     });
   }
   sink.events([
-    { session_id: 'с1', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: DAY, props: '{"outcome":"solved"}', known: 1 },
-    { session_id: 'с1', seq: 2, name: 'level_end', ts: 1, received_at: 1, day: DAY, props: '{"outcome":"abandoned"}', known: 1 },
+    { session_id: 'с1', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: DAY, props: '{"outcome":"solved","length":5}', known: 1 },
+    { session_id: 'с1', seq: 2, name: 'level_end', ts: 1, received_at: 1, day: DAY, props: '{"outcome":"abandoned","length":5}', known: 1 },
   ]);
   sink.events([
-    { session_id: 'с2', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: DAY, props: '{"outcome":"solved"}', known: 1 },
+    { session_id: 'с2', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: DAY, props: '{"outcome":"solved","length":5}', known: 1 },
   ]);
   return db;
 }
@@ -38,11 +38,11 @@ test('свёртка считает игроков за день, а не сес
   db.close();
 });
 
-test('свёртка разбивает событие по исходу', () => {
+test('свёртка разбивает событие по исходу и длине', () => {
   const db = filled();
   rollup(db, DAY);
-  assert.equal(metric(db, 'level_end:solved'), 2);
-  assert.equal(metric(db, 'level_end:abandoned'), 1);
+  assert.equal(metric(db, 'level_end:solved:5'), 2);
+  assert.equal(metric(db, 'level_end:abandoned:5'), 1);
   db.close();
 });
 
@@ -241,6 +241,114 @@ test('свёртка на нескольких сотнях событий не 
   reversed.close();
 });
 
+test('серверная сессия, привязанная к игроку, не засоряет аудиторию', () => {
+  // Замечание 1 (круг 2): серверная псевдосессия покупки заводится с
+  // НАСТОЯЩЕЙ площадкой игрока (не 'server' — см. receiver.mjs,
+  // playerServerSession), поэтому отличить её от обычной клиентской сессии
+  // по платформе больше нельзя. Отличает `entry = 'server'`. Без фильтра по
+  // нему отложенный платёжный колбёк игрока, который сегодня не заходил,
+  // добавил бы и sessions, и присутствие в dau — воспроизводим ровно тот
+  // прогон, что дал ревьюер: три живых сессии плюс один такой колбэк должны
+  // дать dau = 3, sessions = 3, а не 4/4.
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  for (const [id, subject] of [['с1', 'ИГ1'], ['с2', 'ИГ2'], ['с3', 'ИГ3']]) {
+    sink.session({
+      session_id: id, app: 'word-chain', subject_id: subject, anon_subject: subject,
+      key_version: 1, platform: 'vk', verified: 1, app_version: 'abc', language: 'ru',
+      os: 'android', mobile: 1, screen: 'sm', entry: 'direct', day: DAY,
+      started_at: 1000, last_seen_at: 1000,
+    });
+  }
+  // Игрок ИГ4 сегодня не заходил — только прислал отложенный платёжный
+  // колбэк. Сессия — серверная, площадка настоящая (vk), как заводит
+  // playerServerSession в receiver.mjs.
+  sink.session({
+    session_id: 'с4', app: 'word-chain', subject_id: 'ИГ4', anon_subject: 'ИГ4',
+    key_version: 1, platform: 'vk', verified: 1, app_version: null, language: null,
+    os: null, mobile: null, screen: null, entry: 'server', day: DAY,
+    started_at: 1000, last_seen_at: 1000,
+  });
+  sink.events([
+    { session_id: 'с4', seq: 1, name: 'purchase_credited', ts: 1, received_at: 1, day: DAY, props: '{"source":"vk","hints":10}', known: 1 },
+  ]);
+
+  rollup(db, DAY);
+  assert.equal(metric(db, 'dau'), 3);
+  assert.equal(metric(db, 'sessions'), 3);
+
+  // subjects.sessions у ИГ4 тоже не растёт от покупки.
+  const subject = db.prepare('SELECT sessions FROM subjects WHERE subject_id = ?').get('ИГ4');
+  assert.equal(subject.sessions, 0);
+
+  // А подневный счётчик покупок в activity всё равно заполняется — ради
+  // этого привязка и делалась. Цена решения (см. комментарий в
+  // rollup.mjs/sqlite.mjs): день, в который игрок только купил, засчитан
+  // активным (строка activity существует).
+  const activity = db.prepare('SELECT hints_bought FROM activity WHERE app = ? AND day = ? AND subject_id = ?')
+    .get('word-chain', DAY, 'ИГ4');
+  assert.ok(activity);
+  assert.equal(activity.hints_bought, 10);
+  db.close();
+});
+
+test('длина слова вне диапазона не создаёт строку в daily, допустимая — создаёт', () => {
+  // Замечание 2 (круг 2): rollup держит собственную независимую проверку
+  // диапазона длины (isWordLength в rollup.mjs), а не полагается только на
+  // словарь (schema.mjs). Пишем событие с length вне диапазона НАПРЯМУЮ через
+  // sink, в обход validate() из schema.mjs — так же, как выглядела бы база,
+  // если бы словарь когда-нибудь смягчили или в ней осталось сырьё, записанное
+  // до ужесточения. Мощность `daily` (таблицы без ретеншена) не должна
+  // зависеть от того, что когда-то попало в props.
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  sink.session({
+    session_id: 'с1', app: 'word-chain', subject_id: 'ПС1', anon_subject: 'ПС1',
+    key_version: 1, platform: 'vk', verified: 1, app_version: 'abc', language: 'ru',
+    os: 'android', mobile: 1, screen: 'sm', entry: 'direct', day: DAY,
+    started_at: 1000, last_seen_at: 1000,
+  });
+  sink.events([
+    { session_id: 'с1', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: DAY, props: '{"outcome":"solved","length":99}', known: 1 },
+    { session_id: 'с1', seq: 2, name: 'level_end', ts: 2, received_at: 2, day: DAY, props: '{"outcome":"solved","length":5}', known: 1 },
+  ]);
+  rollup(db, DAY);
+  assert.equal(metric(db, 'level_end:solved:99'), undefined);
+  assert.equal(metric(db, 'level_end:solved:5'), 1);
+  // Событие с length вне диапазона всё равно посчитано — просто без суффикса
+  // длины (см. следующий тест про неоднозначность).
+  assert.equal(metric(db, 'level_end'), 1);
+  db.close();
+});
+
+test('частичные измерения не дают неоднозначный суффикс', () => {
+  // Замечание 3 (круг 2): level_end без исхода (например, клиент его не
+  // прислал) и с length = 6 не должен давать "level_end:6" — по форме это
+  // неотличимо от «второго измерения не было, значит 6 — единственное».
+  // Суффикс собирается только когда ВСЕ измерения события валидны; если
+  // хоть одного нет — метрика остаётся голым именем события.
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  sink.session({
+    session_id: 'с1', app: 'word-chain', subject_id: 'ПС1', anon_subject: 'ПС1',
+    key_version: 1, platform: 'vk', verified: 1, app_version: 'abc', language: 'ru',
+    os: 'android', mobile: 1, screen: 'sm', entry: 'direct', day: DAY,
+    started_at: 1000, last_seen_at: 1000,
+  });
+  sink.events([
+    // outcome отсутствует вовсе.
+    { session_id: 'с1', seq: 1, name: 'level_end', ts: 1, received_at: 1, day: DAY, props: '{"length":6}', known: 1 },
+    // outcome неверного типа (замечание 4 заодно — тип проверяется, а не
+    // просто "значение есть").
+    { session_id: 'с1', seq: 2, name: 'level_end', ts: 2, received_at: 2, day: DAY, props: '{"outcome":123,"length":6}', known: 1 },
+  ]);
+  rollup(db, DAY);
+  assert.equal(metric(db, 'level_end:6'), undefined);
+  assert.equal(metric(db, 'level_end:123:6'), undefined);
+  assert.equal(metric(db, 'level_end'), 2);
+  db.close();
+});
+
 test('незнакомое событие не подделывает метрику по исходу', () => {
   // Событие с именем, буквально равным составному ключу метрики, но пришедшее
   // как незнакомое (known = 0), не должно сливаться с настоящей агрегацией
@@ -251,7 +359,8 @@ test('незнакомое событие не подделывает метри
     { session_id: 'с1', seq: 3, name: 'level_end:solved', ts: 1, received_at: 1, day: DAY, props: '{}', known: 0 },
   ]);
   rollup(db, DAY);
-  assert.equal(metric(db, 'level_end:solved'), 2);
+  assert.equal(metric(db, 'level_end:solved:5'), 2);
+  assert.equal(metric(db, 'level_end:solved'), undefined);
   assert.equal(metric(db, 'events_unknown'), 1);
   db.close();
 });

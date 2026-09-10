@@ -32,6 +32,28 @@ const byteSize = (value) => encoder.encode(JSON.stringify(value)).length;
 
 const MODE = ['puzzle', 'daily', 'shared'];
 
+/**
+ * Целое в границах — форма объявления числового поля с диапазоном, а не
+ * голый 'int'. Нужна конкретно для `length`: значение слова используется в
+ * ИМЕНИ метрики свёртки (rollup.mjs), а не только хранится — без диапазона
+ * мощность `daily` (таблицы без срока хранения) определял бы клиент, просто
+ * присылая произвольные числа. Форма общая, чтобы любое другое числовое
+ * поле, которому когда-нибудь тоже понадобится диапазон, не изобретало
+ * второй способ его объявить.
+ */
+const range = (min, max) => ({ kind: 'range', min, max });
+
+/**
+ * Длина слова в игре — от трёх до восьми букв. Не экспортируется и
+ * намеренно не используется нигде за пределами словаря: у rollup.mjs (где
+ * длина попадает в имя метрики) — свой, отдельно заданный диапазон. Общая
+ * константа связала бы два независимых предохранителя в один: смягчи здесь
+ * границу ради нового игрового режима — и лимит на число строк в `daily`
+ * (таблице без ретеншена) молча смягчился бы вместе с ней, никем не
+ * пересмотренный.
+ */
+const WORD_LENGTH = range(3, 8);
+
 export const EVENTS = {
   // Жизненный цикл
   app_ready: { ms_to_ready: 'int', ms_data_load: 'int', from_cache: 'bool' },
@@ -41,10 +63,10 @@ export const EVENTS = {
   session_end: { ms: 'int', events: 'int', reason: ['pagehide', 'timeout'] },
 
   // Уровни
-  level_start: { mode: MODE, length: 'int', level: 'int', resumed: 'bool' },
+  level_start: { mode: MODE, length: WORD_LENGTH, level: 'int', resumed: 'bool' },
   word_rejected: { word: 'str', length: 'int', reason: 'str', attempt: 'int', ms_since_start: 'int' },
   level_end: {
-    outcome: ['solved', 'abandoned'], mode: MODE, length: 'int', level: 'int',
+    outcome: ['solved', 'abandoned'], mode: MODE, length: WORD_LENGTH, level: 'int',
     moves: 'arr', rejects: 'int', hints: 'int', ms: 'int', chain: 'arr', streak: 'int',
   },
   hint_used: {
@@ -97,6 +119,9 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
 function coerce(spec, value) {
   if (Array.isArray(spec)) return spec.includes(value) ? value : undefined;
+  if (spec && typeof spec === 'object' && spec.kind === 'range') {
+    return isInt(value) && value >= spec.min && value <= spec.max ? value : undefined;
+  }
   if (spec === 'int') return isInt(value) ? value : undefined;
   if (spec === 'num') return isNum(value) ? value : undefined;
   if (spec === 'bool') return typeof value === 'boolean' ? value : undefined;
