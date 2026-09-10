@@ -82,6 +82,15 @@ window.addEventListener('pagehide', () => { void client.stop('pagehide'); });
 (тело `{ app, anon_id, launch, ctx }`, ответ `{ session_id }`). Хранилище за
 приёмником не жёстко зашито — это интерфейс `sink`:
 
+Для событий, о которых знает только сервер (начисление после платёжного
+колбэка, отказ по подписи), — `receiver.track(app, name, props, identity?)`.
+Без `identity` событие ложится в общую серверную псевдосессию
+(`subject_id = 'server'`), как и раньше. С `identity = { platform, playerId }`
+— в псевдосессию, привязанную к этому игроку на этот день и
+псевдонимизированную той же функцией (`playerSubject`), что и клиентские
+сессии: так подневные счётчики в свёртке (`hints_bought` и т.п.) ложатся на
+настоящего игрока, а не на фиктивного «server».
+
 ```ts
 interface Sink {
   session(row): void;
