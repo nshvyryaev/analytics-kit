@@ -2,8 +2,11 @@
  * Ночная свёртка и отсечка сырья.
  *
  * Свёртка узкая и общая: новая метрика — новая строка, а не новый столбец и не
- * миграция. Имя метрики склеивается из события и его исхода, потому что
- * интересен почти всегда именно исход: побед без брошенных уровней не бывает.
+ * миграция. Имя метрики склеивается из события и его измерений (см.
+ * DIMENSIONS ниже) — почти всегда это исход, а у событий уровня ещё и длина
+ * слова: побед без брошенных уровней не бывает, а вопрос «на какой длине игра
+ * ломается» — главный во всём треке, и без длины в имени метрики на него не
+ * ответить после того, как сырьё отсечётся.
  *
  * Отсечка трогает только сырьё. `subjects`, `activity` и `daily` переживают её
  * намеренно: на них стоит ретеншен, и его глубина не должна зависеть от того,
@@ -16,29 +19,56 @@
  * `activity` за все дни, и он поэтому тоже не зависит от глубины отсечки.
  */
 
-/** События, у которых исход важнее самого факта. */
+/** События, у которых исход важнее самого факта (для подневных счётчиков игрока). */
 const BY_OUTCOME = { level_end: 'outcome', ad_result: 'outcome', purchase_result: 'outcome' };
 
 /**
- * Достаёт одно поле свойств события. В JS, а не в SQL/json_extract:
- * расширение есть не в каждой сборке SQLite, а строковый поиск подстроки в
- * сыром JSON (`LIKE '%"outcome":"solved"%'`) ловит совпадение и там, где
- * значение просто похоже на нужное, а не равно ему.
+ * Измерения имени метрики — по событию, явный и короткий список полей, а не
+ * рефлексия по всей схеме события из schema.mjs. У level_end кроме outcome и
+ * length есть ещё moves, chain, rejects, hints, ms, streak — включи их сюда,
+ * и метрика взорвалась бы по мощности (moves/chain вообще массивы
+ * произвольной длины) либо просто перестала бы что-то агрегировать: строка
+ * `daily` обязана оставаться редкой сводкой, а не сырьём под другим именем.
+ * Длины слов у нас от трёх до восьми, исходов — единицы, так что
+ * `level_end` × length × outcome даёт до полусотни строк в сутки на
+ * (app, platform) — не взрыв. Расширять список — осознанное решение, а не
+ * побочный эффект появления нового поля в словаре событий.
  */
-function propField(props, field) {
-  try {
-    return JSON.parse(props ?? '{}')[field];
-  } catch {
-    return undefined;
-  }
-}
+const DIMENSIONS = {
+  level_start: ['length'],
+  level_end: ['outcome', 'length'],
+  ad_result: ['outcome'],
+  purchase_result: ['outcome'],
+};
 
-/** Исход события, если у события вообще есть исход. */
-function outcomeOf(name, props) {
+/**
+ * Достаёт одно поле уже распарсенных свойств события. Свойства парсятся один
+ * раз на строку сырья (см. основной цикл rollup) и передаются сюда готовым
+ * объектом — вызывающих мест несколько (имя метрики, исход для activity), и
+ * повторный JSON.parse одного и того же props на каждое из них не нужен.
+ */
+function outcomeOf(name, parsedProps) {
   const field = BY_OUTCOME[name];
   if (!field) return undefined;
-  const value = propField(props, field);
+  const value = parsedProps[field];
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Имя метрики: событие плюс значения его измерений по порядку. Измерение,
+ * которого нет в присланных свойствах (клиент мог не заполнить поле),
+ * пропускается, а не подставляется заглушкой — так `level_end` без length
+ * всё равно попадёт в `level_end:solved`, а не потеряется вовсе.
+ */
+function metricName(name, parsedProps) {
+  const fields = DIMENSIONS[name];
+  if (!fields) return name;
+  const parts = [name];
+  for (const field of fields) {
+    const value = parsedProps[field];
+    if (value !== undefined && value !== null) parts.push(String(value));
+  }
+  return parts.join(':');
 }
 
 export function rollup(db, day) {
@@ -64,19 +94,28 @@ export function rollup(db, day) {
       written += 2;
     }
 
-    // Метрики по (событие, исход) — только по известным событиям. Имя
-    // метрики склеивается из e.name и исхода, и без фильтра `known = 1`
-    // клиент мог бы прислать незнакомое событие с именем, буквально равным
-    // составному ключу (например, "level_end:solved"), и подделать деловую
-    // метрику, ни разу не пройдя валидацию словаря. Незнакомые события не
-    // теряются — они считаются одним общим счётчиком ниже.
-    const counted = db.prepare(
-      `SELECT s.app AS app, s.platform AS platform, e.name AS name,
-              e.props AS props, COUNT(*) AS n
+    // Единый проход по сырым событиям дня — вместо трёх отдельных запросов
+    // (метрики по известным, счётчик незнакомых, подневные счётчики игрока),
+    // каждый из которых заново читал ту же таблицу. У level_end и
+    // word_rejected свойства почти уникальны на каждое событие (moves, chain,
+    // ms и т.п.), так что прежний `GROUP BY ..., e.props` в SQL ничего не
+    // склеивал — он лишь заставлял SQLite вернуть по строке на каждое
+    // событие дня (плюс сортировку для самой группировки), то есть то же
+    // самое, что и без GROUP BY, но дороже. Возвращаться к нему нельзя: он не
+    // уменьшает объём, который едет в JS, а только маскирует это тем, что
+    // выглядит как агрегация. `.iterate()` вместо `.all()` отдаёт строки по
+    // одной прямо из курсора SQLite, не собирая их в массив заранее — в
+    // памяти в любой момент лежит одна строка сырья плюс уже свёрнутые итоги
+    // (totals/unknownTotals/perSubject), а не весь день целиком. При тысяче
+    // игроков в день это была разница между парой строк и ~75 МБ, приезжающими
+    // в память ДВАЖДЫ (по разу на прежний `counted` и `perDay`) — на машине
+    // с 1967 МБ, где рядом ещё один процесс, так делать нельзя.
+    const rows = db.prepare(
+      `SELECT s.app AS app, s.platform AS platform, s.subject_id AS subject_id,
+              e.name AS name, e.props AS props, e.known AS known
        FROM events e JOIN sessions s ON s.session_id = e.session_id
-       WHERE e.day = ? AND e.known = 1
-       GROUP BY s.app, s.platform, e.name, e.props`,
-    ).all(day);
+       WHERE e.day = ?`,
+    ).iterate(day);
 
     // Составной ключ Map — JSON.stringify массива частей, а не склейка со
     // строковым разделителем. У склейки нет безопасного разделителя: печатный
@@ -86,43 +125,11 @@ export function rollup(db, day) {
     // в исходнике. JSON.stringify/JSON.parse однозначны по построению и не
     // нуждаются ни в том, ни в другом — не возвращать это к склейке.
     const totals = new Map();
-    for (const row of counted) {
-      const outcome = outcomeOf(row.name, row.props);
-      const metric = outcome ? `${row.name}:${outcome}` : row.name;
-      const key = JSON.stringify([row.app, row.platform, metric]);
-      totals.set(key, (totals.get(key) ?? 0) + row.n);
-    }
-    for (const [key, value] of totals) {
-      const [app, platform, metric] = JSON.parse(key);
-      put.run(app, day, platform, metric, value);
-      written += 1;
-    }
-
     // Незнакомые события — общий счётчик с фиксированным именем, а не свои
     // метрики по (name, props): их имя и форма не из словаря, доверять им как
     // источнику имени метрики нельзя. Заодно по этой метрике видно, что
     // клиент разъехался со словарём событий.
-    const unknown = db.prepare(
-      `SELECT s.app AS app, s.platform AS platform, COUNT(*) AS n
-       FROM events e JOIN sessions s ON s.session_id = e.session_id
-       WHERE e.day = ? AND e.known = 0
-       GROUP BY s.app, s.platform`,
-    ).all(day);
-    for (const row of unknown) {
-      put.run(row.app, day, row.platform, 'events_unknown', row.n);
-      written += 1;
-    }
-
-    // Подневные счётчики игрока считаются по событиям именно этого дня и
-    // ПЕРЕЗАПИСЫВАЮТ строку activity (а не прибавляют к ней) — перезапись
-    // даёт идемпотентность даром: повторный вызов свёртки того же дня кладёт
-    // то же самое число ещё раз, а не удваивает его.
-    const perDay = db.prepare(
-      `SELECT s.app AS app, s.subject_id AS subject_id, e.name AS name, e.props AS props
-       FROM events e JOIN sessions s ON s.session_id = e.session_id
-       WHERE e.day = ? AND e.name IN ('level_end', 'purchase_result', 'purchase_credited')`,
-    ).all(day);
-
+    const unknownTotals = new Map();
     const perSubject = new Map();
     const bucketOf = (app, subjectId) => {
       const key = JSON.stringify([app, subjectId]);
@@ -133,19 +140,63 @@ export function rollup(db, day) {
       }
       return entry;
     };
-    for (const row of perDay) {
-      const entry = bucketOf(row.app, row.subject_id);
+
+    for (const row of rows) {
+      if (!row.known) {
+        // Без фильтра по known клиент мог бы прислать незнакомое событие с
+        // именем, буквально равным составному ключу метрики (например,
+        // "level_end:solved"), и подделать деловую метрику, ни разу не пройдя
+        // валидацию словаря — поэтому незнакомые события идут в свой счётчик,
+        // а не смешиваются с totals.
+        const key = JSON.stringify([row.app, row.platform]);
+        unknownTotals.set(key, (unknownTotals.get(key) ?? 0) + 1);
+        continue;
+      }
+
+      // Парсим props ровно один раз на строку сырья и переиспользуем
+      // результат для имени метрики и для подневных счётчиков игрока ниже —
+      // вместо того чтобы, как раньше, разбирать один и тот же JSON заново на
+      // каждый отдельный запрос.
+      let parsed;
+      try {
+        parsed = JSON.parse(row.props ?? '{}');
+      } catch {
+        parsed = {};
+      }
+
+      const metric = metricName(row.name, parsed);
+      const key = JSON.stringify([row.app, row.platform, metric]);
+      totals.set(key, (totals.get(key) ?? 0) + 1);
+
+      // Подневные счётчики игрока считаются по событиям именно этого дня и
+      // ниже ПЕРЕЗАПИСЫВАЮТ строку activity (а не прибавляют к ней) —
+      // перезапись даёт идемпотентность даром: повторный вызов свёртки того
+      // же дня кладёт то же самое число ещё раз, а не удваивает его.
       if (row.name === 'level_end') {
-        if (outcomeOf('level_end', row.props) === 'solved') entry.levels_won += 1;
+        const entry = bucketOf(row.app, row.subject_id);
+        if (outcomeOf('level_end', parsed) === 'solved') entry.levels_won += 1;
       } else if (row.name === 'purchase_result') {
-        if (outcomeOf('purchase_result', row.props) === 'purchased') entry.purchases += 1;
-      } else {
+        const entry = bucketOf(row.app, row.subject_id);
+        if (outcomeOf('purchase_result', parsed) === 'purchased') entry.purchases += 1;
+      } else if (row.name === 'purchase_credited') {
         // purchase_credited: подарочные и повторные начисления тоже несут
         // hints — источник не важен, важно сколько подсказок реально упало
         // игроку в кошелёк.
-        const hints = propField(row.props, 'hints');
+        const entry = bucketOf(row.app, row.subject_id);
+        const hints = parsed.hints;
         if (Number.isInteger(hints)) entry.hints_bought += hints;
       }
+    }
+
+    for (const [key, value] of totals) {
+      const [app, platform, metric] = JSON.parse(key);
+      put.run(app, day, platform, metric, value);
+      written += 1;
+    }
+    for (const [key, value] of unknownTotals) {
+      const [app, platform] = JSON.parse(key);
+      put.run(app, day, platform, 'events_unknown', value);
+      written += 1;
     }
 
     // Пишем во все строки activity за день, у которых сегодня была

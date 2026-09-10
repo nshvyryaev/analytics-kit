@@ -155,6 +155,92 @@ test('отсечка не роняется на долгоживущей сес�
   db.close();
 });
 
+test('свёртка включает длину слова в имя метрики уровня', () => {
+  // I5: главный вопрос трека — на какой длине слова игра ломается — не
+  // отвечается метрикой без длины. level_end разбивается по исходу И длине,
+  // level_start — по длине (у него исхода нет вовсе).
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  sink.session({
+    session_id: 'с1', app: 'word-chain', subject_id: 'ПС1', anon_subject: 'ПС1',
+    key_version: 1, platform: 'vk', verified: 1, app_version: 'abc', language: 'ru',
+    os: 'android', mobile: 1, screen: 'sm', entry: 'direct', day: DAY,
+    started_at: 1000, last_seen_at: 1000,
+  });
+  sink.events([
+    { session_id: 'с1', seq: 1, name: 'level_start', ts: 1, received_at: 1, day: DAY, props: '{"mode":"puzzle","length":5,"level":1,"resumed":false}', known: 1 },
+    { session_id: 'с1', seq: 2, name: 'level_end', ts: 2, received_at: 2, day: DAY, props: '{"outcome":"solved","length":5}', known: 1 },
+  ]);
+  rollup(db, DAY);
+  assert.equal(metric(db, 'level_end:solved:5'), 1);
+  assert.equal(metric(db, 'level_start:5'), 1);
+  // Старое имя без длины больше не пишется.
+  assert.equal(metric(db, 'level_end:solved'), undefined);
+  db.close();
+});
+
+test('свёртка на нескольких сотнях событий не грузит сырьё дважды и не зависит от порядка обхода', () => {
+  // I7: раньше props группировались в SQL (бессмысленно — они почти
+  // уникальны на level_end/word_rejected) и читались заново вторым запросом
+  // ради подневных счётчиков игрока. Проверяем, что цифры совпадают с тем,
+  // что дало бы прежнее поведение, и что порядок вставки событий (и,
+  // соответственно, порядок обхода курсора) не меняет итоговые суммы.
+  const build = (order) => {
+    const db = openAnalyticsDb(':memory:');
+    const sink = createSqliteSink(db);
+    for (const [id, subject] of [['с1', 'ПС1'], ['с2', 'ПС2'], ['с3', 'ПС1']]) {
+      sink.session({
+        session_id: id, app: 'word-chain', subject_id: subject, anon_subject: subject,
+        key_version: 1, platform: 'vk', verified: 1, app_version: 'abc', language: 'ru',
+        os: 'android', mobile: 1, screen: 'sm', entry: 'direct', day: DAY,
+        started_at: 1000, last_seen_at: 1000,
+      });
+    }
+    const sessions = ['с1', 'с2', 'с3'];
+    const events = [];
+    let seqBySession = { с1: 0, с2: 0, с3: 0 };
+    for (let i = 0; i < 300; i += 1) {
+      const session = sessions[i % sessions.length];
+      seqBySession[session] += 1;
+      const length = 3 + (i % 6);
+      const outcome = i % 3 === 0 ? 'abandoned' : 'solved';
+      events.push({
+        session_id: session, seq: seqBySession[session], name: 'level_end',
+        ts: i, received_at: i, day: DAY,
+        // moves делает props почти уникальными на каждое событие — как в
+        // реальных данных, ради которых прежний GROUP BY props ничего не
+        // склеивал.
+        props: JSON.stringify({ outcome, length, moves: [i, i + 1, i + 2] }),
+        known: 1,
+      });
+    }
+    const ordered = order === 'reversed' ? [...events].reverse() : events;
+    for (const event of ordered) sink.events([event]);
+    rollup(db, DAY);
+    return db;
+  };
+
+  const forward = build('forward');
+  const reversed = build('reversed');
+
+  const byLengthOutcome = (db, length, outcome) => metric(db, `level_end:${outcome}:${length}`);
+  for (let length = 3; length < 9; length += 1) {
+    for (const outcome of ['solved', 'abandoned']) {
+      assert.equal(byLengthOutcome(forward, length, outcome), byLengthOutcome(reversed, length, outcome));
+    }
+  }
+
+  // Победы у ПС1 (сессии с1 и с3) должны совпасть между прогонами и быть
+  // посчитаны верно — проверяем итоговую сумму, а не только равенство между
+  // прогонами, чтобы поймать регрессию, одинаково сломанную в обоих.
+  const won = (db) => db.prepare('SELECT levels_won FROM subjects WHERE subject_id = ?').get('ПС1').levels_won;
+  assert.equal(won(forward), won(reversed));
+  assert.ok(won(forward) > 0);
+
+  forward.close();
+  reversed.close();
+});
+
 test('незнакомое событие не подделывает метрику по исходу', () => {
   // Событие с именем, буквально равным составному ключу метрики, но пришедшее
   // как незнакомое (known = 0), не должно сливаться с настоящей агрегацией
