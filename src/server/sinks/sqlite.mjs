@@ -109,12 +109,19 @@ export function createSqliteSink(db) {
         app_version, language, os, mobile, screen, entry, day, started_at, last_seen_at)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
+  // Прирост `sessions` — параметр, а не зашитая единица: серверная
+  // псевдосессия, привязанная к игроку (analytics-kit v0.2.0, receiver.mjs
+  // playerServerSession), не должна считаться настоящим заходом игрока — он
+  // мог в этот день вовсе не открывать игру, только купить. Прирост 0 для
+  // таких строк (entry = 'server') оставляет счётчик заходов верным, при
+  // этом сама строка subjects всё равно заводится/обновляется — first_day/
+  // last_day ей всё равно нужны.
   const upsertSubject = db.prepare(
     `INSERT INTO subjects (app, subject_id, first_day, last_day, platform, sessions)
-     VALUES (?,?,?,?,?,1)
+     VALUES (?,?,?,?,?,?)
      ON CONFLICT (app, subject_id) DO UPDATE SET
        last_day = MAX(last_day, excluded.last_day),
-       sessions = sessions + 1`,
+       sessions = sessions + excluded.sessions`,
   );
   const markActivity = db.prepare(
     'INSERT OR IGNORE INTO activity (app, day, subject_id) VALUES (?,?,?)',
@@ -152,7 +159,12 @@ export function createSqliteSink(db) {
           db.exec('COMMIT');
           return;
         }
-        upsertSubject.run(row.app, row.subject_id, row.day, row.day, row.platform);
+        upsertSubject.run(row.app, row.subject_id, row.day, row.day, row.platform, row.entry === 'server' ? 0 : 1);
+        // markActivity — без исключения по entry: подневные счётчики в activity
+        // ради этого и заводились (см. playerServerSession в receiver.mjs) —
+        // покупка это тоже присутствие игрока в этот день, даже если он не
+        // открывал саму игру. Цена решения: день, в который игрок только
+        // купил, засчитается активным.
         markActivity.run(row.app, row.day, row.subject_id);
         // Псевдоним от анонимного идентификатора и псевдоним игрока — один
         // человек. Без этой связи каждый первый запуск выглядит как два разных.

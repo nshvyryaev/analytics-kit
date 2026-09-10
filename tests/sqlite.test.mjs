@@ -78,6 +78,28 @@ test('сессия помнит последнее касание и число 
   db.close();
 });
 
+test('серверная псевдосессия (entry = server) не увеличивает счётчик заходов игрока, но отмечает день активности', () => {
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  sink.session(session({ session_id: 'с2', entry: 'server' }));
+  const subject = db.prepare('SELECT sessions FROM subjects WHERE subject_id = ?').get('ПС1');
+  assert.equal(subject.sessions, 0);
+  const activity = db.prepare('SELECT 1 AS found FROM activity WHERE subject_id = ?').get('ПС1');
+  assert.ok(activity);
+  db.close();
+});
+
+test('обычная и серверная сессии одного игрока: sessions считает только обычные', () => {
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  sink.session(session());
+  sink.session(session({ session_id: 'с2', entry: 'server' }));
+  sink.session(session({ session_id: 'с3' }));
+  const subject = db.prepare('SELECT sessions FROM subjects WHERE subject_id = ?').get('ПС1');
+  assert.equal(subject.sessions, 2);
+  db.close();
+});
+
 test('события чужой сессии не пишутся', () => {
   const db = openAnalyticsDb(':memory:');
   const sink = createSqliteSink(db);
