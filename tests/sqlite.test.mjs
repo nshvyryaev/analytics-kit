@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createSqliteSink, openAnalyticsDb } from '../src/server/sinks/sqlite.mjs';
+import { createReceiver } from '../src/server/receiver.mjs';
 
 const session = (over = {}) => ({
   session_id: 'с1', app: 'word-chain', subject_id: 'ПС1', anon_subject: 'АН1',
@@ -108,4 +113,75 @@ test('события чужой сессии не пишутся', () => {
   const { n } = db.prepare('SELECT COUNT(*) AS n FROM events').get();
   assert.equal(n, 0);
   db.close();
+});
+
+test('база со старой схемой (без server_origin) получает столбец при открытии и не падает', () => {
+  // Круг 3 ревью: `SCHEMA` строится на CREATE TABLE IF NOT EXISTS, а на уже
+  // существующей базе эта команда не делает ничего — состав столбцов не
+  // сверяется. Ревьюер воспроизвёл прогоном: база создана кодом v0.1.4 (до
+  // появления server_origin), эту же базу открывает код v0.2.2 — открытие
+  // проходит молча, а падает createSqliteSink() при подготовке INSERT,
+  // ссылающегося на несуществующий столбец ("table sessions has no column
+  // named server_origin"). Строим старую базу вручную литералом (а не через
+  // старый тег), чтобы тест не зависел от того, доступен ли тег локально, и
+  // явно фиксировал именно тот состав столбцов, который был до этой правки.
+  const dir = mkdtempSync(join(tmpdir(), 'sqlite-migrate-'));
+  const file = join(dir, 'old.db');
+
+  const old = new DatabaseSync(file);
+  old.exec(`
+    CREATE TABLE sessions (
+      session_id   TEXT PRIMARY KEY,
+      app          TEXT    NOT NULL,
+      subject_id   TEXT    NOT NULL,
+      anon_subject TEXT    NOT NULL,
+      key_version  INTEGER NOT NULL,
+      platform     TEXT    NOT NULL,
+      verified     INTEGER NOT NULL,
+      app_version  TEXT,
+      language     TEXT,
+      os           TEXT,
+      mobile       INTEGER,
+      screen       TEXT,
+      entry        TEXT,
+      day          TEXT    NOT NULL,
+      started_at   INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      events       INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  old.prepare(
+    `INSERT INTO sessions
+       (session_id, app, subject_id, anon_subject, key_version, platform, verified,
+        app_version, language, os, mobile, screen, entry, day, started_at, last_seen_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run('старая', 'word-chain', 'ПС0', 'ПС0', 1, 'vk', 1, null, null, null, null, null, 'direct', '2026-09-01', 1, 1);
+  old.close();
+
+  // Открываем ТУ ЖЕ базу текущим кодом — та самая точка, которую до этой
+  // правки нужно было обкладывать try/catch на стороне потребителя.
+  const db = openAnalyticsDb(file);
+  const columns = db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name);
+  assert.ok(columns.includes('server_origin'));
+
+  // Строка, заведённая до появления столбца, получила 0 — не NULL и не
+  // падение на отсутствующем значении: это точный факт (все такие строки —
+  // клиентские сессии), а не заглушка "неизвестно".
+  const oldRow = db.prepare('SELECT server_origin FROM sessions WHERE session_id = ?').get('старая');
+  assert.equal(oldRow.server_origin, 0);
+
+  // Библиотека на такой базе не просто открывается — она работает: и синк,
+  // подготовка запросов которого раньше падала первой, и приёмник поверх
+  // него, — оба создаются и пишут новую сессию без исключений.
+  const sink = createSqliteSink(db);
+  const receiver = createReceiver({
+    sink, key: 'ключ', apps: ['word-chain'], verify: () => ({ ok: false }),
+  });
+  const out = receiver.session({ app: 'word-chain', anon_id: 'новая', ctx: {} });
+  assert.equal(out.status, 200);
+  const newRow = db.prepare('SELECT server_origin FROM sessions WHERE session_id = ?').get(out.body.session_id);
+  assert.equal(newRow.server_origin, 0);
+
+  db.close();
+  rmSync(dir, { recursive: true, force: true });
 });
