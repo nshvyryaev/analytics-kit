@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSqliteSink, openAnalyticsDb } from '../src/server/sinks/sqlite.mjs';
 import { prune, rollup } from '../src/server/rollup.mjs';
+import { createReceiver } from '../src/server/receiver.mjs';
 
 const DAY = '2026-09-09';
 
@@ -136,7 +137,7 @@ test('отсечка не роняется на долгоживущей сес�
   sink.session({
     session_id: 'долгая', app: 'word-chain', subject_id: 'server', anon_subject: 'server',
     key_version: 1, platform: 'server', verified: 1, app_version: null, language: null,
-    os: null, mobile: null, screen: null, entry: 'server', day: OLD_DAY,
+    os: null, mobile: null, screen: null, entry: 'server', server_origin: 1, day: OLD_DAY,
     started_at: 1000, last_seen_at: 1000,
   });
   sink.events([
@@ -245,11 +246,12 @@ test('серверная сессия, привязанная к игроку, �
   // Замечание 1 (круг 2): серверная псевдосессия покупки заводится с
   // НАСТОЯЩЕЙ площадкой игрока (не 'server' — см. receiver.mjs,
   // playerServerSession), поэтому отличить её от обычной клиентской сессии
-  // по платформе больше нельзя. Отличает `entry = 'server'`. Без фильтра по
-  // нему отложенный платёжный колбёк игрока, который сегодня не заходил,
-  // добавил бы и sessions, и присутствие в dau — воспроизводим ровно тот
-  // прогон, что дал ревьюер: три живых сессии плюс один такой колбэк должны
-  // дать dau = 3, sessions = 3, а не 4/4.
+  // по платформе больше нельзя. Отличает `server_origin = 1`, столбец,
+  // который приёмник ставит сам и никогда не берёт из тела запроса. Без
+  // фильтра по нему отложенный платёжный колбёк игрока, который сегодня не
+  // заходил, добавил бы и sessions, и присутствие в dau — воспроизводим
+  // ровно тот прогон, что дал ревьюер: три живых сессии плюс один такой
+  // колбэк должны дать dau = 3, sessions = 3, а не 4/4.
   const db = openAnalyticsDb(':memory:');
   const sink = createSqliteSink(db);
   for (const [id, subject] of [['с1', 'ИГ1'], ['с2', 'ИГ2'], ['с3', 'ИГ3']]) {
@@ -266,7 +268,7 @@ test('серверная сессия, привязанная к игроку, �
   sink.session({
     session_id: 'с4', app: 'word-chain', subject_id: 'ИГ4', anon_subject: 'ИГ4',
     key_version: 1, platform: 'vk', verified: 1, app_version: null, language: null,
-    os: null, mobile: null, screen: null, entry: 'server', day: DAY,
+    os: null, mobile: null, screen: null, entry: 'server', server_origin: 1, day: DAY,
     started_at: 1000, last_seen_at: 1000,
   });
   sink.events([
@@ -346,6 +348,84 @@ test('частичные измерения не дают неоднозначн
   assert.equal(metric(db, 'level_end:6'), undefined);
   assert.equal(metric(db, 'level_end:123:6'), undefined);
   assert.equal(metric(db, 'level_end'), 2);
+  db.close();
+});
+
+test('клиентская сессия с ctx.entry = "server" считается в аудитории как обычная, а серверная псевдосессия — нет', () => {
+  // Ревьюер воспроизвёл ровно это: площадка с валидным (или хоть каким-то)
+  // запросом присылает ctx.entry = 'server' и вычёркивает себя из аудитории,
+  // оставаясь в числителе событий. Проверяем через настоящий вход —
+  // receiver.session() — а не напрямую через sink.session(), чтобы дыра была
+  // видна там, где она была: на пути от тела запроса до столбца, который
+  // решает, кто попадёт в аудиторию.
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  const receiver = createReceiver({
+    sink, key: 'ключ', apps: ['word-chain'],
+    verify: () => ({ ok: false }),
+    now: () => Date.parse(`${DAY}T12:00:00Z`),
+  });
+
+  // Игрок присылает подделанный ctx.entry. Если бы аудитория смотрела на
+  // entry, эта сессия вычеркнула бы себя сама, оставшись в числителе.
+  const { body } = receiver.session({
+    app: 'word-chain', anon_id: 'спуфер', ctx: { entry: 'server' },
+  });
+  const clientRow = db.prepare('SELECT entry, server_origin FROM sessions WHERE session_id = ?').get(body.session_id);
+  // 'server' не входит в перечень допустимых значений entry и отбрасывается
+  // в null; server_origin приёмник никогда не читает из тела запроса — для
+  // этого пути он константа 0.
+  assert.notEqual(clientRow.entry, 'server');
+  assert.equal(clientRow.server_origin, 0);
+
+  // Настоящая серверная псевдосессия — через track(), без клиента вовсе.
+  receiver.track('word-chain', 'payment_rejected', { source: 'vk', reason: 'bad_signature' });
+
+  rollup(db, DAY);
+
+  // Спуфер — обычная сессия площадки 'local' (verify вернул ok:false):
+  // считается в dau как любой другой игрок.
+  const local = db.prepare(
+    "SELECT value FROM daily WHERE app='word-chain' AND day=? AND platform='local' AND metric='dau'",
+  ).get(DAY);
+  assert.equal(local?.value, 1);
+
+  // Настоящая серверная псевдосессия (platform='server') не даёт СВОЕЙ строки
+  // dau вовсе — она исключена из аудитории целиком, а не просто не считается
+  // отдельным игроком внутри чужой площадки.
+  const serverRow = db.prepare(
+    "SELECT value FROM daily WHERE app='word-chain' AND day=? AND platform='server' AND metric='dau'",
+  ).get(DAY);
+  assert.equal(serverRow, undefined);
+  db.close();
+});
+
+test('сессия без ctx.entry всё равно считается в аудитории', () => {
+  // Раньше проверка в SQL была NULL-safe (`entry IS NOT 'server'`) именно
+  // потому, что entry — обычное необязательное поле и могло быть NULL у
+  // клиента, который не прислал ctx.entry вовсе. Мутация IS NOT -> != тихо
+  // осталась бы незамеченной, если бы ни один тест не проверял именно этот
+  // случай: сессию без entry она вычёркивала бы из аудитории, а не только
+  // 'server'. server_origin структурно не может быть NULL (NOT NULL DEFAULT
+  // 0), но гарантия "нет ctx.entry — игрок всё равно в аудитории" должна
+  // остаться проверенной явно, а не только выводиться из схемы столбца.
+  const db = openAnalyticsDb(':memory:');
+  const sink = createSqliteSink(db);
+  const receiver = createReceiver({
+    sink, key: 'ключ', apps: ['word-chain'],
+    verify: () => ({ ok: false }),
+    now: () => Date.parse(`${DAY}T12:00:00Z`),
+  });
+
+  const { body } = receiver.session({ app: 'word-chain', anon_id: 'безentry', ctx: {} });
+  const row = db.prepare('SELECT entry FROM sessions WHERE session_id = ?').get(body.session_id);
+  assert.equal(row.entry, null);
+
+  rollup(db, DAY);
+  const local = db.prepare(
+    "SELECT value FROM daily WHERE app='word-chain' AND day=? AND platform='local' AND metric='dau'",
+  ).get(DAY);
+  assert.equal(local?.value, 1);
   db.close();
 });
 

@@ -110,7 +110,7 @@ export function rollup(db, day) {
     // DAU — по игрокам, не по сессиям: один игрок с тремя сессиями за день
     // должен дать dau = 1, а не 3. Сессии считаются отдельной метрикой рядом.
     //
-    // entry = 'server' исключён намеренно: это псевдосессии track() —
+    // server_origin = 1 исключён намеренно: это псевдосессии track() —
     // общая (subject_id = 'server') и привязанная к игроку по площадке
     // покупки (receiver.mjs, playerServerSession). Игрок мог в этот день
     // вовсе не открывать игру и только прислать отложенный платёжный
@@ -118,14 +118,20 @@ export function rollup(db, day) {
     // sessions завышались бы постоянно, а `daily` переживает отсечку сырья,
     // так что искажение не самоисправляется. Подневные счётчики (activity)
     // такую сессию всё равно видят — см. sqlite.mjs, markActivity.
-    // `entry` — NULLABLE (клиент мог не прислать `ctx.entry`), поэтому
-    // сравнение — `IS NOT`, а не `!=`: у `!=` сравнение с NULL даёт NULL
-    // (то есть "неизвестно"), и WHERE отбросил бы такие строки заодно с
-    // серверными — `IS NOT` в SQLite NULL-safe и оставляет их в аудитории.
+    //
+    // Раньше здесь смотрели на `entry = 'server'` — и это была дыра: `entry`
+    // пишется из тела запроса (ctx.entry), значит клиент им управляет.
+    // Публичный приём с валидной подписью и ctx.entry = 'server' вычёркивал
+    // настоящего игрока из аудитории, оставляя его события в числителе.
+    // `server_origin` приёмник ставит сам и никогда не берёт из сети (см.
+    // комментарий у столбца в sqlite.mjs) — признак недостижим для клиента
+    // по устройству, а не по проверке значения. Столбец NOT NULL DEFAULT 0,
+    // поэтому обычное `=`, без NULL-safe `IS`/`IS NOT`, которое требовалось
+    // старой, нулевой у части сессий колонке.
     const audience = db.prepare(
       `SELECT s.app AS app, s.platform AS platform,
               COUNT(DISTINCT s.subject_id) AS dau, COUNT(*) AS sessions
-       FROM sessions s WHERE s.day = ? AND s.entry IS NOT 'server' GROUP BY s.app, s.platform`,
+       FROM sessions s WHERE s.day = ? AND s.server_origin = 0 GROUP BY s.app, s.platform`,
     ).all(day);
     for (const row of audience) {
       put.run(row.app, day, row.platform, 'dau', row.dau);

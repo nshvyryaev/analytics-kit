@@ -34,6 +34,16 @@ const dayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
 const token = () => randomBytes(16).toString('base64url');
 const bounded = (value, max) => (typeof value === 'string' ? value.slice(0, max) : null);
 
+/**
+ * `entry` (точка входа: прямой запуск, шаринг, ежедневный челлендж) —
+ * описательное поле, а не признак доверия: оно пишется из тела запроса
+ * (`ctx.entry`), значит клиент им управляет. Список допустимых значений —
+ * перечисление, как и у любого другого поля из сети: мусор в описательном
+ * поле не нужен, даже когда он ни на что не влияет.
+ */
+const ENTRY_VALUES = ['direct', 'shared', 'daily'];
+const normalizedEntry = (value) => (ENTRY_VALUES.includes(value) ? value : null);
+
 export function createReceiver({
   sink, key, keyVersion = 1, apps, verify, now = Date.now,
 }) {
@@ -117,7 +127,10 @@ export function createReceiver({
       session_id: id, app, subject_id: 'server', anon_subject: 'server',
       key_version: keyVersion, platform: 'server', verified: 1,
       app_version: null, language: null, os: null, mobile: null, screen: null,
-      entry: 'server', day, started_at: at, last_seen_at: at,
+      // 'server' здесь — просто пояснение для человека, читающего сырьё
+      // глазами; признак, от которого зависит подсчёт аудитории, —
+      // `server_origin` ниже, не это поле (см. комментарий в sqlite.mjs).
+      entry: 'server', server_origin: 1, day, started_at: at, last_seen_at: at,
     }));
   }
 
@@ -136,7 +149,7 @@ export function createReceiver({
       session_id: id, app, subject_id: subjectId, anon_subject: subjectId,
       key_version: keyVersion, platform, verified: 1,
       app_version: null, language: null, os: null, mobile: null, screen: null,
-      entry: 'server', day, started_at: at, last_seen_at: at,
+      entry: 'server', server_origin: 1, day, started_at: at, last_seen_at: at,
     }));
   }
 
@@ -171,7 +184,14 @@ export function createReceiver({
           os: bounded(ctx.os, 16),
           mobile: ctx.mobile ? 1 : 0,
           screen: bounded(ctx.screen, 4),
-          entry: bounded(ctx.entry, 16),
+          entry: normalizedEntry(ctx.entry),
+          // Этот путь — единственный, где сессию заводит клиентский запрос,
+          // и `server_origin` здесь всегда 0 буквально: не переменная,
+          // которая могла бы случайно унаследовать что-то из `ctx`, а
+          // константа. Из тела запроса это поле не читается вообще —
+          // серверное происхождение ставят только serverSession() и
+          // playerServerSession() ниже, сами, без участия сети.
+          server_origin: 0,
           day: dayKey(at), started_at: at, last_seen_at: at,
         });
       } catch (error) {

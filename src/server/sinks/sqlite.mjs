@@ -24,6 +24,16 @@ const SCHEMA = `
     mobile       INTEGER,
     screen       TEXT,
     entry        TEXT,
+    -- Признак серверного происхождения — НЕ entry. entry пишется из тела
+    -- запроса (ctx.entry) и потому клиент им управляет; признак, на который
+    -- опираются подсчёт аудитории и прирост sessions у игрока, обязан быть
+    -- недостижим для клиента по устройству, а не по проверке значения. Этот
+    -- столбец приёмник заполняет сам (receiver.mjs: session() всегда 0,
+    -- serverSession()/playerServerSession() всегда 1) — из тела запроса он
+    -- не читается никогда. NOT NULL с умолчанием 0, а не NULL с проверкой
+    -- IS/IS NOT: обычная сессия не должна требовать особого NULL-safe
+    -- сравнения нигде, где этот столбец используется.
+    server_origin INTEGER NOT NULL DEFAULT 0,
     day          TEXT    NOT NULL,
     started_at   INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
@@ -106,16 +116,22 @@ export function createSqliteSink(db) {
   const insertSession = db.prepare(
     `INSERT OR IGNORE INTO sessions
        (session_id, app, subject_id, anon_subject, key_version, platform, verified,
-        app_version, language, os, mobile, screen, entry, day, started_at, last_seen_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        app_version, language, os, mobile, screen, entry, server_origin, day, started_at, last_seen_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   // Прирост `sessions` — параметр, а не зашитая единица: серверная
   // псевдосессия, привязанная к игроку (analytics-kit v0.2.0, receiver.mjs
   // playerServerSession), не должна считаться настоящим заходом игрока — он
   // мог в этот день вовсе не открывать игру, только купить. Прирост 0 для
-  // таких строк (entry = 'server') оставляет счётчик заходов верным, при
+  // таких строк (server_origin = 1) оставляет счётчик заходов верным, при
   // этом сама строка subjects всё равно заводится/обновляется — first_day/
   // last_day ей всё равно нужны.
+  //
+  // Смотрим на `server_origin`, а не на `entry`: `entry` пишется из тела
+  // запроса, и до этой правки признак доверия жил именно там — площадка
+  // могла прислать ctx.entry = 'server' с валидной подписью и вычесть себя
+  // из аудитории, оставшись в числителе событий. `server_origin` приёмник
+  // выставляет сам и никогда не читает из запроса (см. схему в SCHEMA).
   const upsertSubject = db.prepare(
     `INSERT INTO subjects (app, subject_id, first_day, last_day, platform, sessions)
      VALUES (?,?,?,?,?,?)
@@ -146,7 +162,8 @@ export function createSqliteSink(db) {
         const result = insertSession.run(
           row.session_id, row.app, row.subject_id, row.anon_subject, row.key_version,
           row.platform, row.verified, row.app_version, row.language, row.os,
-          row.mobile, row.screen, row.entry, row.day, row.started_at, row.last_seen_at,
+          row.mobile, row.screen, row.entry, row.server_origin ? 1 : 0,
+          row.day, row.started_at, row.last_seen_at,
         );
         // Повтор той же строки сессии (тот же session_id) — не ошибка: у
         // площадки нет способа отличить потерянный ответ от необработанного
@@ -159,8 +176,8 @@ export function createSqliteSink(db) {
           db.exec('COMMIT');
           return;
         }
-        upsertSubject.run(row.app, row.subject_id, row.day, row.day, row.platform, row.entry === 'server' ? 0 : 1);
-        // markActivity — без исключения по entry: подневные счётчики в activity
+        upsertSubject.run(row.app, row.subject_id, row.day, row.day, row.platform, row.server_origin ? 0 : 1);
+        // markActivity — без исключения по server_origin: подневные счётчики в activity
         // ради этого и заводились (см. playerServerSession в receiver.mjs) —
         // покупка это тоже присутствие игрока в этот день, даже если он не
         // открывал саму игру. Цена решения: день, в который игрок только
