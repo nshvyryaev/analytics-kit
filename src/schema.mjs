@@ -69,9 +69,18 @@ export const EVENTS = {
     outcome: ['solved', 'abandoned'], mode: MODE, length: WORD_LENGTH, level: 'int',
     moves: 'arr', rejects: 'int', hints: 'int', ms: 'int', chain: 'arr', streak: 'int',
   },
+  /**
+   * `kind` — какая это подсказка: буква или целое слово. Поле нужно затем, что
+   * две подсказки стоят разного и берутся по-разному: буква идёт из бесплатной,
+   * запаса или ролика, слово — только из запаса и только после взятой буквы. По
+   * `source` их не различить (у обеих он про то, откуда взялась подсказка), а
+   * без различения не считается главная воронка этой механики: сколько игроков
+   * доходит от буквы до слова.
+   */
   hint_used: {
     length: 'int', level: 'int', move_no: 'int', wallet_before: 'int',
     source: ['free', 'purchased', 'reward'],
+    kind: ['letter', 'word'],
   },
   hint_blocked: { reason: ['empty', 'no-reward', 'ad-too-soon'], wallet: 'int' },
   glossary_open: { word: 'str', from: ['game', 'stats'] },

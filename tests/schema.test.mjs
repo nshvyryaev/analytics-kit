@@ -107,3 +107,27 @@ test('предел меряется в байтах UTF-8, а не в едини
   assert.ok(bytes <= MAX_PROPS_BYTES);
   assert.equal('streak' in out.props, false);
 });
+
+test('hint_used различает подсказку буквы и подсказку слова', () => {
+  // Две подсказки стоят разного и берутся по-разному: буква — из бесплатной,
+  // запаса или ролика, слово — только из запаса и только после буквы. По
+  // событию без этого поля они неразличимы, и воронка «сколько доходит до
+  // слова» не считается вовсе.
+  const letter = validate('hint_used', {
+    length: 4, level: 3, move_no: 2, wallet_before: 5, source: 'purchased', kind: 'letter',
+  });
+  assert.equal(letter.known, true);
+  assert.equal(letter.props.kind, 'letter');
+
+  const word = validate('hint_used', {
+    length: 4, level: 3, move_no: 2, wallet_before: 5, source: 'purchased', kind: 'word',
+  });
+  assert.equal(word.props.kind, 'word');
+
+  // Чужое значение не проходит: перечисление на то и перечисление.
+  const bogus = validate('hint_used', {
+    length: 4, level: 3, move_no: 2, wallet_before: 5, source: 'purchased', kind: 'подсказка',
+  });
+  assert.equal(bogus.known, true);
+  assert.equal('kind' in bogus.props, false);
+});

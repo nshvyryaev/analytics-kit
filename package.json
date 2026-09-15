@@ -1,9 +1,11 @@
 {
   "name": "analytics-kit",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Транспорт, приёмник и хранилище продуктовых событий. Без зависимостей.",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "exports": {
     "./schema": "./src/schema.mjs",
     "./browser": {
@@ -12,6 +14,10 @@
     },
     "./server": "./src/server/index.mjs"
   },
-  "files": ["src"],
-  "scripts": { "test": "node --test" }
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test"
+  }
 }
