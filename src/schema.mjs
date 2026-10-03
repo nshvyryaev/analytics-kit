@@ -60,7 +60,7 @@ const WORD_LENGTH = range(3, 8);
  * каждую правку сценария. В имя метрики свёртки шаг не попадает, так что
  * мощность `daily` клиент через него не раздует.
  */
-const ONBOARDING_FROM = ['first-play', 'how-to'];
+const ONBOARDING_FROM = ['first-play', 'how-to', 'help'];
 
 export const EVENTS = {
   // Жизненный цикл
@@ -139,6 +139,11 @@ export const EVENTS = {
   // вариант реально увиден, и только у записанных в эксперимент. По нему
   // отчёт делит игроков на группы, а метрики берёт из остальных событий.
   ab_exposure: { experiment: 'str', variant: 'str' },
+
+  // Подсказка «Посмотрите обучение» у игрока без обучения: предложена (по
+  // двум отказам хода или по простою) и открыта. Пара даёт воронку подсказки.
+  help_offer: { reason: ['rejects', 'idle'] },
+  help_open: {},
 
   // Остальное
   screen_view: { screen: ['home', 'game', 'stats'], from: 'str' },

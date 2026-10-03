@@ -158,3 +158,10 @@ test('отказ хода в обучении и показ варианта э�
     known: true, props: { experiment: 'onboarding-v2', variant: 'v2' },
   });
 });
+
+test('подсказка «Посмотрите обучение» и вход в обучение из неё известны', () => {
+  assert.deepEqual(validate('help_offer', { reason: 'idle' }), { known: true, props: { reason: 'idle' } });
+  assert.equal('reason' in validate('help_offer', { reason: 'выдумка' }).props, false);
+  assert.deepEqual(validate('help_open', {}), { known: true, props: {} });
+  assert.deepEqual(validate('onboarding_start', { from: 'help' }), { known: true, props: { from: 'help' } });
+});
