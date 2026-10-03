@@ -149,3 +149,12 @@ test('события обучения известны и сохраняют о�
   });
   assert.equal('from' in validate('onboarding_start', { from: 'выдумка' }).props, false);
 });
+
+test('отказ хода в обучении и показ варианта эксперимента известны', () => {
+  assert.deepEqual(validate('onboarding_reject', { step: 'final', from: 'first-play' }), {
+    known: true, props: { step: 'final', from: 'first-play' },
+  });
+  assert.deepEqual(validate('ab_exposure', { experiment: 'onboarding-v2', variant: 'v2' }), {
+    known: true, props: { experiment: 'onboarding-v2', variant: 'v2' },
+  });
+});

@@ -130,6 +130,15 @@ export const EVENTS = {
   onboarding_step: { step: 'str', from: ONBOARDING_FROM },
   onboarding_skip: { step: 'str', from: ONBOARDING_FROM, ms: 'int' },
   onboarding_done: { from: ONBOARDING_FROM, ms: 'int' },
+  // Отказ хода на свободных шагах обучения. Без него было не видно, почему
+  // игроки уходят на последнем, самостоятельном ходе: пробуют и не выходит —
+  // или не пробуют вовсе.
+  onboarding_reject: { step: 'str', from: ONBOARDING_FROM },
+
+  // A/B-эксперименты (ab-kit). Показ, а не назначение: событие уходит, когда
+  // вариант реально увиден, и только у записанных в эксперимент. По нему
+  // отчёт делит игроков на группы, а метрики берёт из остальных событий.
+  ab_exposure: { experiment: 'str', variant: 'str' },
 
   // Остальное
   screen_view: { screen: ['home', 'game', 'stats'], from: 'str' },
