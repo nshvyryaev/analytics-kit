@@ -131,3 +131,21 @@ test('hint_used различает подсказку буквы и подска
   assert.equal(bogus.known, true);
   assert.equal('kind' in bogus.props, false);
 });
+
+test('события обучения известны и сохраняют объявленные свойства', () => {
+  // Игра шлёт их с первого дня обучения; без объявления они копились как
+  // незнакомые и не попадали в свёртку.
+  assert.deepEqual(validate('onboarding_start', { from: 'first-play' }), {
+    known: true, props: { from: 'first-play' },
+  });
+  assert.deepEqual(validate('onboarding_step', { step: 'type-1', from: 'how-to' }), {
+    known: true, props: { step: 'type-1', from: 'how-to' },
+  });
+  assert.deepEqual(validate('onboarding_skip', { step: 'intro', from: 'first-play', ms: 9000 }), {
+    known: true, props: { step: 'intro', from: 'first-play', ms: 9000 },
+  });
+  assert.deepEqual(validate('onboarding_done', { from: 'first-play', ms: 153000 }), {
+    known: true, props: { from: 'first-play', ms: 153000 },
+  });
+  assert.equal('from' in validate('onboarding_start', { from: 'выдумка' }).props, false);
+});

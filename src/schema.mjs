@@ -54,6 +54,14 @@ const range = (min, max) => ({ kind: 'range', min, max });
  */
 const WORD_LENGTH = range(3, 8);
 
+/**
+ * Шаг — строка, а не перечисление: сценарий обучения меняется (и будет
+ * меняться в A/B), а перечисление здесь требовало бы новой версии пакета на
+ * каждую правку сценария. В имя метрики свёртки шаг не попадает, так что
+ * мощность `daily` клиент через него не раздует.
+ */
+const ONBOARDING_FROM = ['first-play', 'how-to'];
+
 export const EVENTS = {
   // Жизненный цикл
   app_ready: { ms_to_ready: 'int', ms_data_load: 'int', from_cache: 'bool' },
@@ -114,6 +122,14 @@ export const EVENTS = {
     source: 'str', item_id: 'str', hints: 'int', ad_free: 'bool', repeat: 'bool',
   },
   payment_rejected: { source: 'str', reason: 'str' },
+
+  // Обучение. Шаг — имя, а не номер: номера съедут от первой правки сценария,
+  // а имя шага в воронке останется тем же. Имена — OnboardingStep в игре.
+  // `from` — откуда пришли: первое «Играть» или «Как играть?» с главной.
+  onboarding_start: { from: ONBOARDING_FROM },
+  onboarding_step: { step: 'str', from: ONBOARDING_FROM },
+  onboarding_skip: { step: 'str', from: ONBOARDING_FROM, ms: 'int' },
+  onboarding_done: { from: ONBOARDING_FROM, ms: 'int' },
 
   // Остальное
   screen_view: { screen: ['home', 'game', 'stats'], from: 'str' },
