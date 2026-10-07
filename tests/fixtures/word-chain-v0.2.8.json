@@ -1,0 +1,274 @@
+{
+  "app_ready": {
+    "ms_to_ready": "int",
+    "ms_data_load": "int",
+    "from_cache": "bool"
+  },
+  "platform_fallback": {
+    "platform": "str",
+    "stage": [
+      "sdk_load",
+      "ready",
+      "storage"
+    ]
+  },
+  "pause": {
+    "ms": "int"
+  },
+  "resume": {
+    "ms": "int"
+  },
+  "session_end": {
+    "ms": "int",
+    "events": "int",
+    "reason": [
+      "pagehide",
+      "timeout"
+    ]
+  },
+  "level_start": {
+    "mode": [
+      "puzzle",
+      "daily",
+      "shared"
+    ],
+    "length": {
+      "kind": "range",
+      "min": 3,
+      "max": 8
+    },
+    "level": "int",
+    "resumed": "bool"
+  },
+  "word_rejected": {
+    "word": "str",
+    "length": "int",
+    "reason": "str",
+    "attempt": "int",
+    "ms_since_start": "int"
+  },
+  "level_end": {
+    "outcome": [
+      "solved",
+      "abandoned"
+    ],
+    "mode": [
+      "puzzle",
+      "daily",
+      "shared"
+    ],
+    "length": {
+      "kind": "range",
+      "min": 3,
+      "max": 8
+    },
+    "level": "int",
+    "moves": "arr",
+    "rejects": "int",
+    "hints": "int",
+    "ms": "int",
+    "chain": "arr",
+    "streak": "int"
+  },
+  "hint_used": {
+    "length": "int",
+    "level": "int",
+    "move_no": "int",
+    "wallet_before": "int",
+    "source": [
+      "free",
+      "purchased",
+      "reward"
+    ],
+    "kind": [
+      "letter",
+      "word"
+    ]
+  },
+  "hint_blocked": {
+    "reason": [
+      "empty",
+      "no-reward",
+      "ad-too-soon"
+    ],
+    "wallet": "int"
+  },
+  "glossary_open": {
+    "word": "str",
+    "from": [
+      "game",
+      "stats"
+    ]
+  },
+  "ad_request": {
+    "kind": [
+      "interstitial",
+      "rewarded"
+    ],
+    "placement": [
+      "level_end",
+      "hint"
+    ],
+    "gap_ms": "int"
+  },
+  "ad_result": {
+    "kind": [
+      "interstitial",
+      "rewarded"
+    ],
+    "placement": [
+      "level_end",
+      "hint"
+    ],
+    "outcome": [
+      "shown",
+      "dismissed",
+      "no_fill",
+      "timeout",
+      "error",
+      "absent"
+    ],
+    "ms": "int"
+  },
+  "store_open": {
+    "from": [
+      "hint_blocked",
+      "menu",
+      "level_end"
+    ],
+    "wallet": "int",
+    "ms_catalog": "int"
+  },
+  "store_item_select": {
+    "item_id": "str",
+    "price": "num",
+    "currency": "str",
+    "price_text": "str"
+  },
+  "purchase_result": {
+    "item_id": "str",
+    "outcome": [
+      "purchased",
+      "cancelled",
+      "unavailable",
+      "timeout"
+    ],
+    "ms": "int"
+  },
+  "store_close": {
+    "bought": "bool",
+    "ms": "int",
+    "items_seen": "int"
+  },
+  "wallet_sync": {
+    "credited": "int",
+    "spent_local": "int",
+    "drift": "int"
+  },
+  "purchase_credited": {
+    "source": "str",
+    "item_id": "str",
+    "hints": "int",
+    "ad_free": "bool",
+    "repeat": "bool"
+  },
+  "payment_rejected": {
+    "source": "str",
+    "reason": "str"
+  },
+  "onboarding_start": {
+    "from": [
+      "first-play",
+      "how-to",
+      "help"
+    ]
+  },
+  "onboarding_step": {
+    "step": "str",
+    "from": [
+      "first-play",
+      "how-to",
+      "help"
+    ]
+  },
+  "onboarding_skip": {
+    "step": "str",
+    "from": [
+      "first-play",
+      "how-to",
+      "help"
+    ],
+    "ms": "int"
+  },
+  "onboarding_done": {
+    "from": [
+      "first-play",
+      "how-to",
+      "help"
+    ],
+    "ms": "int"
+  },
+  "onboarding_reject": {
+    "step": "str",
+    "from": [
+      "first-play",
+      "how-to",
+      "help"
+    ]
+  },
+  "ab_exposure": {
+    "experiment": "str",
+    "variant": "str"
+  },
+  "help_offer": {
+    "reason": [
+      "rejects",
+      "idle"
+    ]
+  },
+  "help_open": {},
+  "screen_view": {
+    "screen": [
+      "home",
+      "game",
+      "stats"
+    ],
+    "from": "str"
+  },
+  "share_click": {
+    "kind": [
+      "puzzle",
+      "result"
+    ],
+    "method": [
+      "platform",
+      "clipboard",
+      "browser"
+    ]
+  },
+  "share_result": {
+    "kind": [
+      "puzzle",
+      "result"
+    ],
+    "method": [
+      "platform",
+      "clipboard",
+      "browser"
+    ],
+    "ok": "bool"
+  },
+  "settings_change": {
+    "key": [
+      "sound",
+      "accent",
+      "theme"
+    ],
+    "value": "str"
+  },
+  "app_error": {
+    "where": "str",
+    "message": "str",
+    "fatal": "bool"
+  }
+}

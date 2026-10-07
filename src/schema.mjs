@@ -62,14 +62,47 @@ const WORD_LENGTH = range(3, 8);
  */
 const ONBOARDING_FROM = ['first-play', 'how-to', 'help'];
 
-export const EVENTS = {
+/**
+ * Общая часть словаря — события, которые значат одно и то же в любой игре:
+ * жизненный цикл, ошибка, окно оплаты, факты о деньгах. Раздел приложения
+ * (`APPS`) перекрывает общую часть по имени события ЦЕЛИКОМ, а не по
+ * отдельным свойствам: слияние двух разных форм под одним именем дало бы
+ * форму, которую не объявлял никто.
+ */
+export const COMMON = {
   // Жизненный цикл
   app_ready: { ms_to_ready: 'int', ms_data_load: 'int', from_cache: 'bool' },
   platform_fallback: { platform: 'str', stage: ['sdk_load', 'ready', 'storage'] },
   pause: { ms: 'int' },
   resume: { ms: 'int' },
   session_end: { ms: 'int', events: 'int', reason: ['pagehide', 'timeout'] },
+  app_error: { where: 'str', message: 'str', fatal: 'bool' },
 
+  // Покупки
+  /**
+   * Цена лежит в двух видах не ради дублирования, а потому что площадки
+   * отдают её по-разному, и это не унифицировать на клиенте без разбора
+   * локализованного текста регулярками. ВКонтакте отдаёт число с валютой
+   * (голоса/ОКи) — `price`/`currency` заполнены и пригодны для арифметики
+   * (сумма, средний чек). Яндекс отдаёт только готовую строку вида «19 ₽» —
+   * для неё `price_text` обязателен и есть у всех площадок; `price`/`currency`
+   * там просто не приходят, и разбирать строку в число значило бы гадать по
+   * формату конкретной локали, который может измениться без нашего ведома.
+   */
+  store_item_select: { item_id: 'str', price: 'num', currency: 'str', price_text: 'str' },
+  purchase_result: {
+    item_id: 'str', outcome: ['purchased', 'cancelled', 'unavailable', 'timeout'], ms: 'int',
+  },
+  purchase_credited: { source: ['vk', 'yandex', 'manual'], item_id: 'str', repeat: 'bool' },
+  payment_rejected: { source: 'str', reason: 'str' },
+};
+
+/**
+ * Раздел word-chain. Вместе с `COMMON` даёт словарь v0.2.8 без единого
+ * изменения (tests/fixtures/word-chain-v0.2.8.json). `purchase_credited`
+ * свой: у word-chain начисление несёт подсказки и отключение рекламы.
+ */
+const WORD_CHAIN = {
   // Уровни
   level_start: { mode: MODE, length: WORD_LENGTH, level: 'int', resumed: 'bool' },
   word_rejected: { word: 'str', length: 'int', reason: 'str', attempt: 'int', ms_since_start: 'int' },
@@ -102,26 +135,11 @@ export const EVENTS = {
 
   // Покупки
   store_open: { from: ['hint_blocked', 'menu', 'level_end'], wallet: 'int', ms_catalog: 'int' },
-  /**
-   * Цена лежит в двух видах не ради дублирования, а потому что площадки
-   * отдают её по-разному, и это не унифицировать на клиенте без разбора
-   * локализованного текста регулярками. ВКонтакте отдаёт число с валютой
-   * (голоса/ОКи) — `price`/`currency` заполнены и пригодны для арифметики
-   * (сумма, средний чек). Яндекс отдаёт только готовую строку вида «19 ₽» —
-   * для неё `price_text` обязателен и есть у всех площадок; `price`/`currency`
-   * там просто не приходят, и разбирать строку в число значило бы гадать по
-   * формату конкретной локали, который может измениться без нашего ведома.
-   */
-  store_item_select: { item_id: 'str', price: 'num', currency: 'str', price_text: 'str' },
-  purchase_result: {
-    item_id: 'str', outcome: ['purchased', 'cancelled', 'unavailable', 'timeout'], ms: 'int',
-  },
   store_close: { bought: 'bool', ms: 'int', items_seen: 'int' },
   wallet_sync: { credited: 'int', spent_local: 'int', drift: 'int' },
   purchase_credited: {
     source: 'str', item_id: 'str', hints: 'int', ad_free: 'bool', repeat: 'bool',
   },
-  payment_rejected: { source: 'str', reason: 'str' },
 
   // Обучение. Шаг — имя, а не номер: номера съедут от первой правки сценария,
   // а имя шага в воронке останется тем же. Имена — OnboardingStep в игре.
@@ -150,8 +168,131 @@ export const EVENTS = {
   share_click: { kind: ['puzzle', 'result'], method: ['platform', 'clipboard', 'browser'] },
   share_result: { kind: ['puzzle', 'result'], method: ['platform', 'clipboard', 'browser'], ok: 'bool' },
   settings_change: { key: ['sound', 'accent', 'theme'], value: 'str' },
-  app_error: { where: 'str', message: 'str', fatal: 'bool' },
 };
+
+// Раздел image-uncovered. Диапазоны — у всего, что может попасть в имя метрики
+// свёртки или в корзину отчёта: номер уровня, проценты, жизни, оценки.
+const IU_MODE = ['campaign', 'endless', 'daily', 'custom'];
+const IU_LEVEL = range(1, 99999);
+const IU_PCT = range(0, 100);
+const IU_LIVES = range(0, 7);
+const IU_SCALE = range(1, 5);
+const IU_AD_KIND = ['interstitial', 'rewarded'];
+const IU_AD_PLACEMENT = ['level_start', 'custom_start', 'continue'];
+const IU_BOARD = ['campaign', 'endless', 'daily'];
+const IU_AUTH_TRIGGER = ['purchase', 'vote'];
+const IU_NICK_TRIGGER = ['leaderboard', 'settings', 'custom_level'];
+const IU_VOTE_TARGET = ['campaign', 'level'];
+
+const IMAGE_UNCOVERED = {
+  // Загрузка и сеть
+  level_load: {
+    mode: IU_MODE, level_id: 'str', source: ['bundled', 'cache', 'network'], ms: 'int',
+    image_ok: 'bool', preloaded: 'bool',
+  },
+  net_error: {
+    kind: ['catalog', 'level', 'image', 'daily', 'leaderboard', 'score', 'nick', 'vote', 'purchase', 'session'],
+    reason: ['offline', 'timeout', 'http_4xx', 'http_5xx'],
+    retry: 'int',
+  },
+
+  // Экраны и настройки
+  screen_view: {
+    screen: ['start', 'campaigns', 'game', 'leaderboard', 'settings', 'store', 'campaign_end', 'custom'],
+    from: 'str',
+  },
+  campaign_select: { campaign_id: 'str', campaigns_done: 'int', locked: 'bool' },
+  settings_change: { key: ['control_side', 'haptics', 'controls_visibility', 'theme'], value: 'str' },
+
+  // Забег и уровни
+  run_start: { mode: IU_MODE, campaign_id: 'str', lives: IU_LIVES, ad_free: 'bool', resumed: 'bool' },
+  level_start: {
+    mode: IU_MODE, campaign_id: 'str', level: IU_LEVEL, level_id: 'str', lives: IU_LIVES, attempt: 'int',
+  },
+  life_lost: {
+    mode: IU_MODE, level: IU_LEVEL, level_id: 'str', cause: ['enemy_hit_player', 'enemy_hit_trail'],
+    coverage_pct: IU_PCT, ms_since_start: 'int', lives_left: IU_LIVES,
+  },
+  level_end: {
+    outcome: ['won', 'lost', 'abandoned'], mode: IU_MODE, campaign_id: 'str', level: IU_LEVEL,
+    level_id: 'str', ms: 'int', coverage_pct: IU_PCT, score: 'int', lives_left: IU_LIVES,
+    deaths: 'int', bonuses: 'int', life_bonus: 'int', attempt: 'int', inferred: 'bool',
+  },
+  continue_choice: {
+    mode: IU_MODE, level: IU_LEVEL, choice: ['ad_life', 'restart', 'menu', 'closed'], ms: 'int',
+    ad_life_available: 'bool', unavailable_reason: ['limit', 'offline', 'cooldown'],
+  },
+  run_end: {
+    mode: IU_MODE, campaign_id: 'str', outcome: ['lost', 'completed', 'quit'], levels_done: 'int',
+    score: 'int', ms: 'int', ad_lives_used: 'int',
+  },
+
+  // Реклама. `granted` у `ad_result` — только для rewarded, открывшейся после
+  // таймаута (`late_shown`): выдана ли награда, когда игрок уже ушёл дальше.
+  ad_request: { kind: IU_AD_KIND, placement: IU_AD_PLACEMENT, gap_ms: 'int' },
+  ad_result: {
+    kind: IU_AD_KIND, placement: IU_AD_PLACEMENT,
+    outcome: ['shown', 'dismissed', 'no_fill', 'throttled', 'timeout', 'late_shown', 'error', 'absent'],
+    ms: 'int', granted: 'bool',
+  },
+  ad_skipped: { placement: IU_AD_PLACEMENT, reason: ['ad_free', 'first_level', 'cooldown', 'offline'] },
+
+  // Витрина и вход
+  store_open: { from: ['menu', 'catalog'] },
+  auth_prompt: { trigger: IU_AUTH_TRIGGER, item_id: 'str' },
+  auth_result: {
+    trigger: IU_AUTH_TRIGGER, outcome: ['authorized', 'declined', 'error'], ms: 'int', continued: 'bool',
+  },
+
+  // Ник и таблицы
+  nick_prompt: { trigger: IU_NICK_TRIGGER, prefilled: 'bool', input: ['touch', 'keyboard'] },
+  nick_result: {
+    trigger: IU_NICK_TRIGGER, outcome: ['saved', 'rejected', 'queued', 'cancelled', 'error'],
+    reject_reason: ['length', 'chars', 'blocked'], attempts: 'int', ms: 'int', kept_prefill: 'bool',
+  },
+  score_submit: {
+    board: IU_BOARD, outcome: ['accepted', 'queued', 'rejected', 'error'], new_best: 'bool',
+    rank_bucket: ['1', '2-10', '11-50', '51-500', '500+'], has_nick: 'bool',
+  },
+  score_rejected: {
+    board: IU_BOARD,
+    reason: ['board', 'level_ids', 'level_count', 'level_score', 'run_score', 'duration', 'daily_window', 'rate'],
+  },
+
+  // Оценки
+  vote_prompt: { target: IU_VOTE_TARGET, target_id: 'str' },
+  vote_result: {
+    target: IU_VOTE_TARGET, target_id: 'str', difficulty: IU_SCALE, liked: IU_SCALE,
+    outcome: ['submitted', 'skipped', 'queued'],
+  },
+};
+
+/** Разделы приложений. Приложение без раздела получает только `COMMON`. */
+export const APPS = {
+  'word-chain': WORD_CHAIN,
+  'image-uncovered': IMAGE_UNCOVERED,
+};
+
+/**
+ * Приложение по умолчанию у `validate` — word-chain: до v0.3.0 словарь был
+ * один, его, и вызов с двумя параметрами обязан значить ровно то же, что раньше.
+ */
+export const DEFAULT_APP = 'word-chain';
+
+// Слияние считается один раз на приложение. Ключи карты — только имена из
+// `APPS`: имя приложения может прийти из сети, и кэш по произвольной строке
+// рос бы без предела.
+const dictionaries = new Map(
+  Object.entries(APPS).map(([app, section]) => [app, { ...COMMON, ...section }]),
+);
+
+/** Полный словарь приложения: общая часть, перекрытая разделом по имени события. */
+export function dictionary(app = DEFAULT_APP) {
+  return dictionaries.get(app) ?? COMMON;
+}
+
+/** Словарь word-chain под прежним именем — для тех, кто импортировал его до v0.3.0. */
+export const EVENTS = dictionary(DEFAULT_APP);
 
 const isInt = (v) => Number.isInteger(v);
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -194,8 +335,9 @@ function fit(props) {
   return props;
 }
 
-export function validate(name, props) {
-  const shape = EVENTS[name];
+export function validate(name, props, app = DEFAULT_APP) {
+  const dict = dictionary(app);
+  const shape = Object.hasOwn(dict, name) ? dict[name] : undefined;
   const source = props && typeof props === 'object' ? props : {};
   const out = {};
 
