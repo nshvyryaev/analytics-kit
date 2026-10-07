@@ -102,12 +102,6 @@ export function createClient({
 
   async function flush(beacon = false) {
     if (queue.length === 0) return;
-    // Без сессии отправлять некуда, но копить можно: сессия откроется через
-    // мгновение, а события до неё — это как раз загрузка, самое интересное.
-    if (!sessionId) {
-      persist();
-      return;
-    }
     // Очередь сейчас сольётся — отложенный флаш по таймеру больше не нужен,
     // иначе сработает вхолостую: лишнее пробуждение в вебвью не бесплатно.
     if (timer !== null) {
@@ -118,12 +112,23 @@ export function createClient({
     // приёмник берёт из пачки не больше 100 и ограничивает тело по размеру —
     // лишнее пропало бы молча. Маяк к тому же ограничен 64 КБ на всё в полёте.
     while (queue.length > 0) {
+      // Часть уходит под сессией своих событий, а не под текущей: хвост
+      // прошлого запуска, отправленный под новой сессией, приписал бы выход
+      // из игры не тому заходу, а повтор уже доставленной пачки не отсеялся
+      // бы по (session_id, seq). Своей сессии нет у событий, записанных до
+      // её открытия, — они принадлежат текущей. Нет и текущей — копим: сессия
+      // откроется через мгновение, а события до неё — это как раз загрузка.
+      const s = queue[0].s ?? sessionId;
+      if (!s) break;
       const batch = [];
+      const wire = [];
       let size = ENVELOPE;
       while (batch.length < maxBatch && batch.length < queue.length) {
+        const { s: own, ...event } = queue[batch.length];
+        if ((own ?? sessionId) !== s) break;
         let bytes;
         try {
-          bytes = utf8(JSON.stringify(queue[batch.length]));
+          bytes = utf8(JSON.stringify(event));
         } catch {
           bytes = Infinity;
         }
@@ -136,13 +141,14 @@ export function createClient({
         if (size + bytes > maxBytes) break;
         size += bytes + 1;
         batch.push(queue[batch.length]);
+        wire.push(event);
       }
-      if (batch.length === 0) break;
+      if (batch.length === 0) continue;
       // Забираем из головы до отправки: пока пачка в полёте, track() дописывает
       // в хвост, и эти события не должны ни уйти дважды, ни пропасть.
       queue.splice(0, batch.length);
       try {
-        await send(endpoint, JSON.stringify({ s: sessionId, sent_at: now(), e: batch }), beacon);
+        await send(endpoint, JSON.stringify({ s, sent_at: now(), e: wire }), beacon);
       } catch {
         // Возвращаем в голову очереди: порядок важнее свежести, номера сквозные.
         // Остальные части не пробуем: сеть, отказавшая сейчас, откажет и им.
@@ -165,7 +171,10 @@ export function createClient({
         // события в сторону и перенумеровываем ниже, после того как счётчик
         // встанет на восстановленное значение.
         const early = queue;
-        queue = Array.isArray(parsed.queue) ? parsed.queue : [];
+        // Не-объекты отбрасываем: на них споткнулся бы разбор частей во flush().
+        queue = Array.isArray(parsed.queue)
+          ? parsed.queue.filter((event) => event && typeof event === 'object')
+          : [];
         // Счётчик и очередь сохраняются вместе, но запись могла пройти не
         // полностью (испорченное хранилище, обрыв, очередь от прежней
         // версии клиента) — доверять их согласованности нельзя. Если
@@ -201,6 +210,9 @@ export function createClient({
         false,
       );
       sessionId = answer ? JSON.parse(answer).session_id ?? null : null;
+      // Ничьи события — записанные до открытия — с этой минуты принадлежат
+      // ей: если их отправка сорвётся, следующий запуск повторит их под ней же.
+      if (sessionId) for (const event of queue) event.s ??= sessionId;
     } catch {
       sessionId = null;
     }
@@ -211,7 +223,7 @@ export function createClient({
   function track(name, props) {
     try {
       seq += 1;
-      queue.push({ q: seq, n: name, t: now(), ...(props ? { p: props } : {}) });
+      queue.push({ q: seq, n: name, t: now(), ...(props ? { p: props } : {}), ...(sessionId ? { s: sessionId } : {}) });
       if (queue.length > maxQueue) queue = queue.slice(-maxQueue);
       if (queue.length >= flushAt) void flush();
       else arm();

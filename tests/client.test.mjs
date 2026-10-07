@@ -367,3 +367,52 @@ test('отказ на второй части возвращает её и ос�
   const names = h.sent.filter((r) => !r.url.endsWith('/session')).flatMap((r) => r.body.e.map((e) => e.n));
   assert.deepEqual(names, ['a', 'b', 'c', 'd', 'e']);
 });
+
+test('хвост прошлого запуска уходит под своей сессией, а не под новой', async () => {
+  // Первый запуск: сессия открылась, но пачка не ушла.
+  const first = harness();
+  let online = false;
+  const flaky = async (url, body) => {
+    if (!url.endsWith('/session') && !online) throw new Error('сеть');
+    return first.send(url, body);
+  };
+  const a = createClient({ endpoint: '/v1/collect', app: 'word-chain', ...first, send: flaky });
+  await a.start(info);
+  a.track('level_end');
+  await a.stop('pagehide');
+
+  // Второй запуск: сервер выдаёт другую сессию.
+  online = true;
+  const sent = [];
+  const send = async (url, body) => {
+    sent.push({ url, body: JSON.parse(body) });
+    return url.endsWith('/session') ? JSON.stringify({ session_id: 'с2' }) : null;
+  };
+  const b = createClient({ endpoint: '/v1/collect', app: 'word-chain', storage: first.storage, send });
+  b.track('app_ready');
+  await b.start(info);
+  b.track('level_start');
+  await b.flush();
+  const batches = sent.filter((r) => !r.url.endsWith('/session'));
+  // start() сам флашит: хвост с1 и app_ready уходят разными частями.
+  assert.deepEqual(
+    batches.flatMap((r) => r.body.e.map((e) => `${r.body.s}:${e.n}`)),
+    ['с1:level_end', 'с1:session_end', 'с2:app_ready', 'с2:level_start'],
+  );
+  assert.deepEqual(batches[0].body.e.map((e) => e.n), ['level_end', 'session_end']);
+  // Сессия — свойство пачки, в каждом событии её нет: протокол прежний.
+  assert.ok(batches.every((r) => r.body.e.every((e) => !('s' in e))));
+});
+
+test('события до открытия сессии запоминают её, как только она открылась', async () => {
+  const h = harness();
+  const fail = async (url, body) => {
+    if (!url.endsWith('/session')) throw new Error('сеть');
+    return h.send(url, body);
+  };
+  const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', ...h, send: fail });
+  client.track('app_ready');
+  await client.start(info);
+  const saved = JSON.parse(h.store.get('analytics_queue'));
+  assert.deepEqual(saved.queue.map((e) => [e.n, e.s]), [['app_ready', 'с1']]);
+});
