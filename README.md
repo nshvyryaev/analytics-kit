@@ -37,6 +37,10 @@
 
 ## Транспорт (`src/browser`)
 
+Подпуть `analytics-kit/browser` объявлен в `exports`; для TypeScript с
+`moduleResolution: node` (так собирает Cocos Creator), который `exports` не читает,
+типы подпути указаны ещё и в `typesVersions`.
+
 ```js
 import { createClient } from 'analytics-kit/browser';
 

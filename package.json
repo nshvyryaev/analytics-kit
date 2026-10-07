@@ -14,6 +14,13 @@
     },
     "./server": "./src/server/index.mjs"
   },
+  "typesVersions": {
+    "*": {
+      "browser": [
+        "src/browser/index.d.ts"
+      ]
+    }
+  },
   "files": [
     "src"
   ],
