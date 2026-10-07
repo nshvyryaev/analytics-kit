@@ -56,8 +56,8 @@ function utf8(text) {
   return encoder.encode(text).length;
 }
 
-// Запас на обёртку пачки: `{"s":…,"sent_at":…,"e":[]}`.
-const ENVELOPE = 128;
+// Запас на обёртку пачки: `{"s":…,"a":…,"sent_at":…,"e":[]}`, имя приложения — до 64 символов.
+const ENVELOPE = 200;
 
 export function createClient({
   endpoint,
@@ -155,7 +155,7 @@ export function createClient({
       // в хвост, и эти события не должны ни уйти дважды, ни пропасть.
       queue.splice(0, batch.length);
       try {
-        await send(endpoint, JSON.stringify({ s, sent_at: now(), e: wire }), beacon);
+        await send(endpoint, JSON.stringify({ s, a: app, sent_at: now(), e: wire }), beacon);
       } catch {
         // Возвращаем в голову очереди: порядок важнее свежести, номера сквозные.
         // Остальные части не пробуем: сеть, отказавшая сейчас, откажет и им.

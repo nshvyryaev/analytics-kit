@@ -48,6 +48,7 @@ export function createReceiver({
   sink, key, keyVersion = 1, apps, verify, now = Date.now,
 }) {
   const allowed = new Set(apps);
+  const [soleApp] = allowed;
   // Счётчик событий на сессию держится в памяти: он нужен только чтобы
   // остановить поток, а после перезапуска поток и так начнётся заново.
   const counts = new Map();
@@ -211,6 +212,15 @@ export function createReceiver({
       const list = Array.isArray(body?.e) ? body.e : [];
       if (!sessionId || list.length === 0) return { status: 204 };
 
+      // Словарь — по приложению сессии. Клиент v0.3.0 называет его полем `a`;
+      // старый клиент поля не шлёт, и у сервера с одним приложением оно
+      // однозначно. Сервер с несколькими приложениями без `a` проверяет
+      // события только по общей части. Совпадение `a` с приложением сессии
+      // сверяет хранилище: только оно знает, чья это сессия.
+      const claimed = bounded(body?.a, 64);
+      if (claimed && !allowed.has(claimed)) return { status: 204 };
+      const app = claimed ?? (allowed.size === 1 ? soleApp : null);
+
       const seen = counts.get(sessionId) ?? 0;
       // Остаток бюджета, а не просто факт достижения потолка: проверка
       // «seen >= MAX_SESSION_EVENTS» пропустила бы пачку из 100 событий
@@ -230,7 +240,7 @@ export function createReceiver({
         const seq = Number.isInteger(item?.q) ? item.q : null;
         if (!name || seq === null) continue;
         const clientTs = Number.isFinite(item?.t) ? item.t : sentAt;
-        const { known, props } = validate(name, item?.p);
+        const { known, props } = validate(name, item?.p, app);
         rows.push({
           session_id: sessionId, seq, name,
           ts: clientTs + skew, received_at: receivedAt, day: dayKey(clientTs + skew),
@@ -239,7 +249,7 @@ export function createReceiver({
       }
 
       try {
-        const written = sink.events(rows);
+        const written = sink.events(rows, claimed ? { app: claimed } : undefined);
         // Писать счётчик только когда реально что-то записано: для чужой
         // (несуществующей) сессии sink.events возвращает 0, и если бы Map
         // всё равно заводила запись, поток запросов со случайным `s` растил
@@ -280,7 +290,7 @@ export function createReceiver({
         : serverSession(app);
       if (!id) return;
       const at = now();
-      const { known, props: clean } = validate(name, props);
+      const { known, props: clean } = validate(name, props, app);
       const seq = (serverCounts.get(id) ?? 0) + 1;
       serverCounts.set(id, seq);
       try {

@@ -210,7 +210,7 @@ export function createSqliteSink(db) {
     `UPDATE sessions SET last_seen_at = MAX(last_seen_at, ?), events = events + ?
      WHERE session_id = ?`,
   );
-  const sessionExists = db.prepare('SELECT 1 AS found FROM sessions WHERE session_id = ?');
+  const sessionApp = db.prepare('SELECT app FROM sessions WHERE session_id = ?');
 
   return {
     session(row) {
@@ -252,12 +252,19 @@ export function createSqliteSink(db) {
       }
     },
 
-    events(rows) {
+    /**
+     * `app` — приложение, по словарю которого приёмник проверил пачку. Сессия
+     * другого приложения — пачка отбрасывается целиком: её события проверены
+     * не тем словарём. Без `app` сверки нет (старый клиент, поле `a` не шлёт).
+     */
+    events(rows, { app } = {}) {
       if (rows.length === 0) return 0;
       const sessionId = rows[0].session_id;
       // События без своей сессии писать некуда: внешний ключ их всё равно не
       // пустит, а падать на чужом идентификаторе незачем — он приходит извне.
-      if (!sessionExists.get(sessionId)) return 0;
+      const session = sessionApp.get(sessionId);
+      if (!session) return 0;
+      if (app !== undefined && session.app !== app) return 0;
 
       try {
         db.exec('BEGIN');
