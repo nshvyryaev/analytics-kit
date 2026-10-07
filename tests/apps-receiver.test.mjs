@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { createReceiver } from '../src/server/receiver.mjs';
 import { createSqliteSink, openAnalyticsDb } from '../src/server/sinks/sqlite.mjs';
 import { createClient } from '../src/browser/client.mjs';
+import { validate } from '../src/schema.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const KEY = 'ключ';
 
@@ -136,4 +141,50 @@ test('K-8: все серверные события от клиента — не
     assert.deepEqual(events(s).map((e) => e.known), [0, 0, 0], app);
   }
   db.close();
+});
+
+test('K-9: validate называет отброшенные свойства, а при чистом событии поля нет', () => {
+  const bad = validate('ad_request', { kind: 'rewarded', placement: 'level_end', gap_ms: 5, лишнее: 1 }, 'image-uncovered');
+  assert.deepEqual(bad, { known: true, props: { kind: 'rewarded', gap_ms: 5 }, dropped: 'placement,лишнее' });
+  const ok = validate('ad_request', { kind: 'rewarded', placement: 'continue', gap_ms: 5 }, 'image-uncovered');
+  assert.equal('dropped' in ok, false);
+  // У незнакомого события словаря нет — отброшенное не считается.
+  assert.equal('dropped' in validate('выдумка', { a: {} }, 'image-uncovered'), false);
+});
+
+test('K-9: значение вне перечисления → в базе dropped = placement, чистое событие — NULL', () => {
+  const { db, receiver, open } = setup(BOTH);
+  const s = open('image-uncovered');
+  receiver.collect({
+    s, a: 'image-uncovered', sent_at: 10_000,
+    e: [
+      { q: 1, n: 'ad_request', t: 10_000, p: { kind: 'interstitial', placement: 'level_end', gap_ms: 1 } },
+      { q: 2, n: 'ad_request', t: 10_000, p: { kind: 'interstitial', placement: 'level_start', gap_ms: 1 } },
+    ],
+  });
+  const rows = db.prepare('SELECT seq, known, dropped FROM events WHERE session_id = ? ORDER BY seq').all(s);
+  assert.deepEqual(rows.map((r) => [r.seq, r.known, r.dropped]), [[1, 1, 'placement'], [2, 1, null]]);
+  db.close();
+});
+
+test('K-9: миграция базы v0.2.7 добавляет столбец events.dropped', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kit-k9-'));
+  const file = join(dir, 'old.db');
+  const old = new DatabaseSync(file);
+  // Таблица events в составе v0.2.7 — без dropped.
+  old.exec(`CREATE TABLE events (
+    session_id TEXT NOT NULL, seq INTEGER NOT NULL, name TEXT NOT NULL, ts INTEGER NOT NULL,
+    received_at INTEGER NOT NULL, day TEXT NOT NULL, props TEXT, known INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (session_id, seq)) WITHOUT ROWID`);
+  old.exec("INSERT INTO events VALUES ('с0', 1, 'pause', 1, 1, '1970-01-01', '{}', 1)");
+  old.close();
+
+  const db = openAnalyticsDb(file);
+  const columns = db.prepare('PRAGMA table_info(events)').all().map((c) => c.name);
+  assert.ok(columns.includes('dropped'));
+  assert.equal(db.prepare("SELECT dropped FROM events WHERE session_id = 'с0'").get().dropped, null);
+  db.close();
+  // Повторное открытие идемпотентно.
+  openAnalyticsDb(file).close();
+  rmSync(dir, { recursive: true, force: true });
 });

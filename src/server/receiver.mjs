@@ -240,11 +240,11 @@ export function createReceiver({
         const seq = Number.isInteger(item?.q) ? item.q : null;
         if (!name || seq === null) continue;
         const clientTs = Number.isFinite(item?.t) ? item.t : sentAt;
-        const { known, props } = validateClient(name, item?.p, app);
+        const { known, props, dropped } = validateClient(name, item?.p, app);
         rows.push({
           session_id: sessionId, seq, name,
           ts: clientTs + skew, received_at: receivedAt, day: dayKey(clientTs + skew),
-          props: JSON.stringify(props), known: known ? 1 : 0,
+          props: JSON.stringify(props), known: known ? 1 : 0, dropped: dropped ?? null,
         });
       }
 
@@ -290,13 +290,14 @@ export function createReceiver({
         : serverSession(app);
       if (!id) return;
       const at = now();
-      const { known, props: clean } = validate(name, props, app);
+      const { known, props: clean, dropped } = validate(name, props, app);
       const seq = (serverCounts.get(id) ?? 0) + 1;
       serverCounts.set(id, seq);
       try {
         sink.events([{
           session_id: id, seq, name, ts: at, received_at: at,
           day: dayKey(at), props: JSON.stringify(clean), known: known ? 1 : 0,
+          dropped: dropped ?? null,
         }]);
       } catch (error) {
         console.error('[аналитика] серверное событие не записано', error);

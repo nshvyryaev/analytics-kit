@@ -372,5 +372,18 @@ export function validate(name, props, app = DEFAULT_APP) {
     const kept = coerce(spec, source[key]);
     if (kept !== undefined) out[key] = kept;
   }
-  return { known: true, props: fit(out) };
+  fit(out);
+
+  // Что пришло, но не записано: значение не того типа или вне перечисления,
+  // необъявленный ключ, хвост, срезанный по размеру. Без этого известное
+  // событие теряло бы свойство молча — словарь клиента разъехался, а в базе
+  // всё выглядит как known = 1. Поле есть, только когда что-то отброшено.
+  const dropped = [];
+  for (const key of Object.keys(source)) {
+    if (dropped.length >= MAX_UNKNOWN_KEYS) break;
+    if (!Object.hasOwn(out, key)) dropped.push(key.slice(0, MAX_STR));
+  }
+  return dropped.length
+    ? { known: true, props: out, dropped: dropped.join(',') }
+    : { known: true, props: out };
 }

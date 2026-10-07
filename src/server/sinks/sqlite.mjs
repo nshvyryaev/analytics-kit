@@ -51,6 +51,9 @@ const SCHEMA = `
     day         TEXT    NOT NULL,
     props       TEXT,
     known       INTEGER NOT NULL DEFAULT 1,
+    -- Имена свойств, которые пришли, но не записаны (через запятую); NULL —
+    -- ничего не отброшено. Ловит разъехавшийся словарь у known = 1 (K-9).
+    dropped     TEXT,
     PRIMARY KEY (session_id, seq),
     FOREIGN KEY (session_id) REFERENCES sessions (session_id)
   ) WITHOUT ROWID;
@@ -133,6 +136,11 @@ const MIGRATIONS = {
     // а точный факт.
     ['server_origin', 'INTEGER NOT NULL DEFAULT 0'],
   ],
+  events: [
+    // v0.3.0: dropped — что словарь отбросил у известного события (K-9).
+    // NULL у старых строк верен: тогда отброшенное не записывали.
+    ['dropped', 'TEXT'],
+  ],
 };
 
 /**
@@ -203,8 +211,8 @@ export function createSqliteSink(db) {
     'INSERT OR IGNORE INTO aliases (app, anon_subject, subject_id) VALUES (?,?,?)',
   );
   const insertEvent = db.prepare(
-    `INSERT OR IGNORE INTO events (session_id, seq, name, ts, received_at, day, props, known)
-     VALUES (?,?,?,?,?,?,?,?)`,
+    `INSERT OR IGNORE INTO events (session_id, seq, name, ts, received_at, day, props, known, dropped)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
   );
   const touchSession = db.prepare(
     `UPDATE sessions SET last_seen_at = MAX(last_seen_at, ?), events = events + ?
@@ -274,7 +282,7 @@ export function createSqliteSink(db) {
           if (row.session_id !== sessionId) continue;
           const result = insertEvent.run(
             row.session_id, row.seq, row.name, row.ts, row.received_at,
-            row.day, row.props, row.known,
+            row.day, row.props, row.known, row.dropped ?? null,
           );
           written += result.changes;
           latest = Math.max(latest, row.received_at);
