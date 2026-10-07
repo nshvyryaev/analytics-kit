@@ -20,7 +20,7 @@
  */
 import { randomBytes } from 'node:crypto';
 
-import { validate } from '../schema.mjs';
+import { validate, validateClient } from '../schema.mjs';
 import { anonSubject, playerSubject } from './identity.mjs';
 
 const MAX_BATCH = 100;
@@ -240,7 +240,7 @@ export function createReceiver({
         const seq = Number.isInteger(item?.q) ? item.q : null;
         if (!name || seq === null) continue;
         const clientTs = Number.isFinite(item?.t) ? item.t : sentAt;
-        const { known, props } = validate(name, item?.p, app);
+        const { known, props } = validateClient(name, item?.p, app);
         rows.push({
           session_id: sessionId, seq, name,
           ts: clientTs + skew, received_at: receivedAt, day: dayKey(clientTs + skew),

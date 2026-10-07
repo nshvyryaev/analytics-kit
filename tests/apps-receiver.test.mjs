@@ -104,3 +104,36 @@ test('K-7: клиент называет своё приложение в каж
   const batch = sent.find((r) => !r.url.endsWith('/session'));
   assert.equal(batch.body.a, 'image-uncovered');
 });
+
+test('K-8: purchase_credited из /v1/collect пишется незнакомым, через track() — знакомым', () => {
+  const { db, receiver, open, events } = setup(BOTH);
+  const s = open('image-uncovered');
+  receiver.collect({
+    s, a: 'image-uncovered', sent_at: 10_000,
+    e: [{ q: 1, n: 'purchase_credited', t: 10_000, p: { source: 'вымысел', item_id: 'life-1', repeat: false } }],
+  });
+  const [fromClient] = events(s);
+  assert.equal(fromClient.known, 0);
+  // Свойства не проверяются словарём: значение вне перечисления не выброшено.
+  assert.equal(JSON.parse(fromClient.props).source, 'вымысел');
+
+  receiver.track('image-uncovered', 'purchase_credited', { source: 'vk', item_id: 'life-1', repeat: false });
+  const fromServer = db.prepare(
+    "SELECT known FROM events WHERE name = 'purchase_credited' AND session_id != ?",
+  ).get(s);
+  assert.equal(fromServer.known, 1);
+  db.close();
+});
+
+test('K-8: все серверные события от клиента — незнакомые, в любом приложении', () => {
+  const { db, receiver, open, events } = setup(BOTH);
+  for (const app of BOTH) {
+    const s = open(app);
+    receiver.collect({
+      s, a: app, sent_at: 10_000,
+      e: ['purchase_credited', 'payment_rejected', 'score_rejected'].map((n, i) => ({ q: i + 1, n, t: 10_000, p: {} })),
+    });
+    assert.deepEqual(events(s).map((e) => e.known), [0, 0, 0], app);
+  }
+  db.close();
+});

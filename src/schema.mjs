@@ -335,19 +335,37 @@ function fit(props) {
   return props;
 }
 
+/**
+ * События, факт которых знает только сервер: деньги и отказ результата. От
+ * клиента (`/v1/collect`) такое имя — подделка или ошибка, и записывается как
+ * незнакомое (`known = 0`): свойства не проверяются словарём, в свёртку
+ * событие не идёт. Сервер пишет их через `track()` — там они знакомы.
+ */
+export const SERVER_ONLY = new Set(['purchase_credited', 'payment_rejected', 'score_rejected']);
+
+/** Свойства незнакомого события: только примитивы, не больше `MAX_UNKNOWN_KEYS` ключей. */
+function unknown(source) {
+  const out = {};
+  for (const [key, value] of Object.entries(source).slice(0, MAX_UNKNOWN_KEYS)) {
+    const kept = loose(value);
+    if (kept !== undefined) out[key] = kept;
+  }
+  return { known: false, props: fit(out) };
+}
+
+/** Проверка события, пришедшего от клиента: `validate`, но `SERVER_ONLY` — незнакомые. */
+export function validateClient(name, props, app = DEFAULT_APP) {
+  if (SERVER_ONLY.has(name)) return unknown(props && typeof props === 'object' ? props : {});
+  return validate(name, props, app);
+}
+
 export function validate(name, props, app = DEFAULT_APP) {
   const dict = dictionary(app);
   const shape = Object.hasOwn(dict, name) ? dict[name] : undefined;
   const source = props && typeof props === 'object' ? props : {};
   const out = {};
 
-  if (!shape) {
-    for (const [key, value] of Object.entries(source).slice(0, MAX_UNKNOWN_KEYS)) {
-      const kept = loose(value);
-      if (kept !== undefined) out[key] = kept;
-    }
-    return { known: false, props: fit(out) };
-  }
+  if (!shape) return unknown(source);
 
   for (const [key, spec] of Object.entries(shape)) {
     if (!(key in source)) continue;
