@@ -26,4 +26,8 @@ export function createClient(options: {
   flushAt?: number;
   flushMs?: number;
   maxQueue?: number;
+  /** Событий в одной части флаша, по умолчанию 50. */
+  maxBatch?: number;
+  /** Байт UTF-8 в одной части флаша, по умолчанию 16384. */
+  maxBytes?: number;
 }): AnalyticsClient;

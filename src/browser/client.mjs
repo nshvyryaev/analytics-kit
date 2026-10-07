@@ -48,6 +48,17 @@ function defaultSend(url, body, beacon) {
   });
 }
 
+// Размер в байтах UTF-8, а не в символах: кириллица в props занимает по два.
+let encoder;
+function utf8(text) {
+  if (typeof TextEncoder !== 'function') return text.length * 3;
+  encoder ??= new TextEncoder();
+  return encoder.encode(text).length;
+}
+
+// Запас на обёртку пачки: `{"s":…,"sent_at":…,"e":[]}`.
+const ENVELOPE = 128;
+
 export function createClient({
   endpoint,
   app,
@@ -57,6 +68,8 @@ export function createClient({
   flushAt = 20,
   flushMs = 15000,
   maxQueue = 200,
+  maxBatch = 50,
+  maxBytes = 16384,
 }) {
   let sessionId = null;
   let seq = 0;
@@ -101,16 +114,43 @@ export function createClient({
       clearTimeout(timer);
       timer = null;
     }
-    const batch = queue;
-    queue = [];
-    try {
-      await send(endpoint, JSON.stringify({ s: sessionId, sent_at: now(), e: batch }), beacon);
-      persist();
-    } catch {
-      // Возвращаем в голову очереди: порядок важнее свежести, номера сквозные.
-      queue = [...batch, ...queue].slice(-maxQueue);
-      persist();
+    // Частями, а не всей очередью: после офлайна в очереди до 200 событий, а
+    // приёмник берёт из пачки не больше 100 и ограничивает тело по размеру —
+    // лишнее пропало бы молча. Маяк к тому же ограничен 64 КБ на всё в полёте.
+    while (queue.length > 0) {
+      const batch = [];
+      let size = ENVELOPE;
+      while (batch.length < maxBatch && batch.length < queue.length) {
+        let bytes;
+        try {
+          bytes = utf8(JSON.stringify(queue[batch.length]));
+        } catch {
+          bytes = Infinity;
+        }
+        // Событие, которое не сериализуется или одно не влезает в пачку, не
+        // уйдёт никогда и навсегда заткнёт голову очереди. Выбрасываем его.
+        if (ENVELOPE + bytes > maxBytes) {
+          queue.splice(batch.length, 1);
+          continue;
+        }
+        if (size + bytes > maxBytes) break;
+        size += bytes + 1;
+        batch.push(queue[batch.length]);
+      }
+      if (batch.length === 0) break;
+      // Забираем из головы до отправки: пока пачка в полёте, track() дописывает
+      // в хвост, и эти события не должны ни уйти дважды, ни пропасть.
+      queue.splice(0, batch.length);
+      try {
+        await send(endpoint, JSON.stringify({ s: sessionId, sent_at: now(), e: batch }), beacon);
+      } catch {
+        // Возвращаем в голову очереди: порядок важнее свежести, номера сквозные.
+        // Остальные части не пробуем: сеть, отказавшая сейчас, откажет и им.
+        queue = [...batch, ...queue].slice(-maxQueue);
+        break;
+      }
     }
+    persist();
   }
 
   async function start(info) {

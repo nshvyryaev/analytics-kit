@@ -306,3 +306,64 @@ test('дефолтные sendBeacon и fetch на успехе очищают о
     restore();
   }
 });
+
+test('флаш уходит частями не больше maxBatch событий', async () => {
+  const h = harness();
+  const client = createClient({
+    endpoint: '/v1/collect', app: 'word-chain', flushAt: 10_000, maxQueue: 500, ...h,
+  });
+  await client.start(info);
+  for (let ms = 0; ms < 120; ms += 1) client.track('pause', { ms });
+  await client.flush();
+  const batches = h.sent.filter((r) => !r.url.endsWith('/session'));
+  assert.deepEqual(batches.map((r) => r.body.e.length), [50, 50, 20]);
+  // Порядок и номера сквозные через все части.
+  assert.deepEqual(batches.flatMap((r) => r.body.e.map((e) => e.q)), [...Array(120)].map((_, i) => i + 1));
+});
+
+test('часть не превышает maxBytes в байтах UTF-8', async () => {
+  const h = harness();
+  const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', flushAt: 10_000, ...h });
+  await client.start(info);
+  // Кириллица — по два байта: 10 событий по ~2 КБ символов ≈ 4 КБ байт каждое.
+  for (let i = 0; i < 10; i += 1) client.track('note', { text: 'я'.repeat(2000) });
+  await client.flush();
+  const bodies = h.sent.filter((r) => !r.url.endsWith('/session'));
+  assert.ok(bodies.length > 1);
+  for (const r of bodies) {
+    assert.ok(Buffer.byteLength(JSON.stringify(r.body)) <= 16384);
+  }
+  assert.equal(bodies.reduce((n, r) => n + r.body.e.length, 0), 10);
+});
+
+test('событие больше maxBytes выбрасывается и не затыкает очередь', async () => {
+  const h = harness();
+  const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', flushAt: 10_000, ...h });
+  await client.start(info);
+  client.track('a');
+  client.track('huge', { text: 'x'.repeat(20_000) });
+  client.track('b');
+  await client.flush();
+  const names = h.sent.filter((r) => !r.url.endsWith('/session')).flatMap((r) => r.body.e.map((e) => e.n));
+  assert.deepEqual(names, ['a', 'b']);
+});
+
+test('отказ на второй части возвращает её и остаток в очередь по порядку', async () => {
+  const h = harness();
+  let batches = 0;
+  const send = async (url, body) => {
+    if (!url.endsWith('/session') && ++batches === 2) throw new Error('сеть');
+    return h.send(url, body);
+  };
+  const client = createClient({
+    endpoint: '/v1/collect', app: 'word-chain', flushAt: 10_000, maxBatch: 2, ...h, send,
+  });
+  await client.start(info);
+  for (const n of ['a', 'b', 'c', 'd', 'e']) client.track(n);
+  await client.flush();
+  const saved = JSON.parse(h.store.get('analytics_queue'));
+  assert.deepEqual(saved.queue.map((e) => e.n), ['c', 'd', 'e']);
+  await client.flush();
+  const names = h.sent.filter((r) => !r.url.endsWith('/session')).flatMap((r) => r.body.e.map((e) => e.n));
+  assert.deepEqual(names, ['a', 'b', 'c', 'd', 'e']);
+});
