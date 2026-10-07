@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createClient } from '../src/browser/client.mjs';
 
@@ -415,4 +415,102 @@ test('события до открытия сессии запоминают е�
   await client.start(info);
   const saved = JSON.parse(h.store.get('analytics_queue'));
   assert.deepEqual(saved.queue.map((e) => [e.n, e.s]), [['app_ready', 'с1']]);
+});
+
+/** Сервер, у которого открытие сессии падает, пока `down` не снят. */
+function flakySession(h) {
+  const state = { down: true, attempts: 0 };
+  state.send = async (url, body) => {
+    if (url.endsWith('/session')) {
+      state.attempts += 1;
+      if (state.down) throw new Error('сеть');
+    }
+    return h.send(url, body);
+  };
+  return state;
+}
+
+const settle = async () => {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+};
+
+test('неудачное открытие сессии повторяется с удвоением паузы', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const h = harness();
+    const net = flakySession(h);
+    const client = createClient({
+      endpoint: '/v1/collect', app: 'word-chain', retryMs: 1000, retryMaxMs: 3000, ...h, send: net.send,
+    });
+    client.track('app_ready');
+    await client.start(info);
+    assert.equal(net.attempts, 1);
+    mock.timers.tick(999);
+    await settle();
+    assert.equal(net.attempts, 1);
+    mock.timers.tick(1);
+    await settle();
+    assert.equal(net.attempts, 2); // через 1000
+    mock.timers.tick(1999);
+    await settle();
+    assert.equal(net.attempts, 2);
+    mock.timers.tick(1);
+    await settle();
+    assert.equal(net.attempts, 3); // ещё через 2000
+    net.down = false;
+    mock.timers.tick(3000); // 4000 упёрлось в потолок 3000
+    await settle();
+    assert.equal(net.attempts, 4);
+    assert.equal(client.sessionId, 'с1');
+    const batch = h.sent.find((r) => !r.url.endsWith('/session'));
+    assert.deepEqual(batch.body.e.map((e) => e.n), ['app_ready']);
+    // Сессия открыта — повторы прекратились.
+    mock.timers.tick(100_000);
+    await settle();
+    assert.equal(net.attempts, 4);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('событие online повторяет открытие сразу, а с открытой сессией — флашит хвост', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'addEventListener');
+  const handlers = [];
+  Object.defineProperty(globalThis, 'addEventListener', {
+    value: (type, fn) => { if (type === 'online') handlers.push(fn); },
+    configurable: true, writable: true,
+  });
+  try {
+    const h = harness();
+    const net = flakySession(h);
+    let batchesDown = false;
+    const send = async (url, body) => {
+      if (!url.endsWith('/session') && batchesDown) throw new Error('сеть');
+      return net.send(url, body);
+    };
+    const client = createClient({ endpoint: '/v1/collect', app: 'word-chain', retryMs: 60_000, ...h, send });
+    await client.start(info);
+    assert.equal(handlers.length, 1);
+    assert.equal(client.sessionId, null);
+
+    net.down = false;
+    handlers[0]();
+    await settle();
+    assert.equal(net.attempts, 2);
+    assert.equal(client.sessionId, 'с1');
+
+    batchesDown = true;
+    client.track('level_end');
+    await client.flush();
+    assert.equal(h.sent.filter((r) => !r.url.endsWith('/session')).length, 0);
+    batchesDown = false;
+    handlers[0]();
+    await settle();
+    const batch = h.sent.find((r) => !r.url.endsWith('/session'));
+    assert.deepEqual(batch.body.e.map((e) => e.n), ['level_end']);
+    assert.equal(net.attempts, 2);
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'addEventListener', original);
+    else delete globalThis.addEventListener;
+  }
 });

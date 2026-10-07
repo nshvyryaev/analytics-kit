@@ -30,4 +30,8 @@ export function createClient(options: {
   maxBatch?: number;
   /** Байт UTF-8 в одной части флаша, по умолчанию 16384. */
   maxBytes?: number;
+  /** Первая пауза перед повтором открытия сессии, мс; дальше удваивается. По умолчанию 5000. */
+  retryMs?: number;
+  /** Потолок паузы повтора, мс. По умолчанию 300000. */
+  retryMaxMs?: number;
 }): AnalyticsClient;

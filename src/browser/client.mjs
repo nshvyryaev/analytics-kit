@@ -70,12 +70,19 @@ export function createClient({
   maxQueue = 200,
   maxBatch = 50,
   maxBytes = 16384,
+  retryMs = 5000,
+  retryMaxMs = 300000,
 }) {
   let sessionId = null;
   let seq = 0;
   let queue = [];
   let timer = null;
   let startedAt = now();
+  // Повтор открытия сессии: тело запроса, таймер, текущая пауза, запрос в полёте.
+  let opener = null;
+  let retryTimer = null;
+  let retryDelay = retryMs;
+  let opening = false;
 
   const persist = () => {
     // Сохраняем и номер: иначе после восстановления очереди номера начнутся
@@ -204,11 +211,35 @@ export function createClient({
     }
 
     try {
-      const answer = await send(
-        `${endpoint}/session`,
-        JSON.stringify({ app, anon_id: info.anonId, launch: info.launch, ctx: info.ctx }),
-        false,
-      );
+      opener = JSON.stringify({ app, anon_id: info.anonId, launch: info.launch, ctx: info.ctx });
+    } catch {
+      // Без тела открывать нечего; события копятся и переживут закрытие.
+    }
+    startedAt = now();
+    // Повтор по появлению сети: запуск без связи иначе ждал бы таймера, а
+    // вебвью на телефоне часто живёт меньше паузы. С открытой сессией — это
+    // флаш застрявшего хвоста, который иначе ждал бы следующего события.
+    if (opener && typeof addEventListener === 'function') {
+      addEventListener('online', () => {
+        if (retryTimer !== null) clearTimeout(retryTimer);
+        retryTimer = null;
+        retryDelay = retryMs;
+        void (sessionId ? flush() : open());
+      });
+    }
+    await open();
+  }
+
+  /**
+   * Открывает сессию; при неудаче повторяет с удвоением паузы до retryMaxMs.
+   * Запуск без сети иначе так и остался бы без сессии до конца, а все его
+   * события ждали бы следующего запуска.
+   */
+  async function open() {
+    if (sessionId || opening || !opener) return;
+    opening = true;
+    try {
+      const answer = await send(`${endpoint}/session`, opener, false);
       sessionId = answer ? JSON.parse(answer).session_id ?? null : null;
       // Ничьи события — записанные до открытия — с этой минуты принадлежат
       // ей: если их отправка сорвётся, следующий запуск повторит их под ней же.
@@ -216,7 +247,17 @@ export function createClient({
     } catch {
       sessionId = null;
     }
-    startedAt = now();
+    opening = false;
+    if (sessionId) retryDelay = retryMs;
+    else if (retryTimer === null && typeof setTimeout === 'function') {
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        void open();
+      }, retryDelay);
+      retryTimer.unref?.();
+      retryDelay = Math.min(retryDelay * 2, retryMaxMs);
+    }
+    // Без сессии flush() только сохранит очередь — это и нужно.
     await flush();
   }
 
