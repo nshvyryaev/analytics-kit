@@ -76,6 +76,58 @@ function outcomeOf(name, parsedProps) {
 }
 
 /**
+ * Подневные счётчики игрока word-chain: победа — `level_end` с исходом
+ * `solved`, покупка — `purchase_result` с `purchased`, подсказки — сумма
+ * `hints` из `purchase_credited` (подарочные и повторные тоже: важно, сколько
+ * подсказок реально упало игроку в кошелёк).
+ */
+function wordChainActivity(name, parsed, entry) {
+  if (name === 'level_end') {
+    if (outcomeOf('level_end', parsed) === 'solved') entry.levels_won += 1;
+  } else if (name === 'purchase_result') {
+    if (outcomeOf('purchase_result', parsed) === 'purchased') entry.purchases += 1;
+  } else if (name === 'purchase_credited') {
+    const hints = parsed.hints;
+    if (Number.isInteger(hints)) entry.hints_bought += hints;
+  }
+}
+
+/**
+ * Профили свёртки по приложениям (K-11): что из событий приложения
+ * превращается в имя метрики вечной таблицы `daily` (`dimensions`), какие
+ * события двигают подневные счётчики `activity` (`activity`), и какие пары
+ * «старт → конец» достраивает `inferEnds` (`ends`).
+ *
+ * Профиль word-chain — ровно прежние константы этого файла. У image-uncovered
+ * в v0.3.0 профиль урезан сознательно (решение Б-34 ImageUncovered): метрики —
+ * голые имена событий, `activity` — только факт сессии (счётчики нулевые),
+ * удержанию этого хватает, а разрезы по уровням есть в сырье за 30 суток.
+ * Расширение — дописать сюда измерения, а не трогать сам проход свёртки.
+ *
+ * Приложение без профиля получает `BARE`: `dau`, `sessions`, голые имена и
+ * `events_unknown`. Чужие измерения ему не подходят: у другого словаря
+ * `outcome` и `length` значат другое, и свёртка посчитала бы мусор.
+ */
+export const ROLLUP = {
+  'word-chain': { dimensions: DIMENSIONS, activity: wordChainActivity, ends: [] },
+  'image-uncovered': {
+    dimensions: {},
+    activity: null,
+    // Конец уровня без `level_end` (вкладку убили без pagehide) достраивает
+    // inferEnds: ключ попытки — [level_id, attempt], область — аноним.
+    ends: [{
+      start: 'level_start', end: 'level_end', key: ['level_id', 'attempt'],
+      set: { outcome: 'abandoned', inferred: true },
+    }],
+  },
+};
+
+const BARE = { dimensions: {}, activity: null, ends: [] };
+
+/** Профиль свёртки приложения; имя приложения приходит из базы — только свои ключи. */
+export const profileOf = (app) => (Object.hasOwn(ROLLUP, app) ? ROLLUP[app] : BARE);
+
+/**
  * Имя метрики: событие плюс значения ВСЕХ его измерений по порядку — либо
  * ничего, кроме голого имени события. Частичный суффикс неоднозначен: если
  * бы `level_end` без исхода (клиент мог не прислать его) давал
@@ -85,8 +137,8 @@ function outcomeOf(name, parsedProps) {
  * (isWordLength/isOutcome), либо метрика — просто `name`, без единого
  * суффикса.
  */
-function metricName(name, parsedProps) {
-  const fields = DIMENSIONS[name];
+function metricName(name, parsedProps, dimensions) {
+  const fields = Object.hasOwn(dimensions, name) ? dimensions[name] : undefined;
   if (!fields) return name;
   const parts = [];
   for (const [field, isValid] of fields) {
@@ -219,7 +271,8 @@ export function rollup(db, day) {
         parsed = {};
       }
 
-      const metric = metricName(row.name, parsed);
+      const profile = profileOf(row.app);
+      const metric = metricName(row.name, parsed, profile.dimensions);
       const key = JSON.stringify([row.app, row.platform, metric]);
       totals.set(key, (totals.get(key) ?? 0) + 1);
 
@@ -227,20 +280,7 @@ export function rollup(db, day) {
       // ниже ПЕРЕЗАПИСЫВАЮТ строку activity (а не прибавляют к ней) —
       // перезапись даёт идемпотентность даром: повторный вызов свёртки того
       // же дня кладёт то же самое число ещё раз, а не удваивает его.
-      if (row.name === 'level_end') {
-        const entry = bucketOf(row.app, row.subject_id);
-        if (outcomeOf('level_end', parsed) === 'solved') entry.levels_won += 1;
-      } else if (row.name === 'purchase_result') {
-        const entry = bucketOf(row.app, row.subject_id);
-        if (outcomeOf('purchase_result', parsed) === 'purchased') entry.purchases += 1;
-      } else if (row.name === 'purchase_credited') {
-        // purchase_credited: подарочные и повторные начисления тоже несут
-        // hints — источник не важен, важно сколько подсказок реально упало
-        // игроку в кошелёк.
-        const entry = bucketOf(row.app, row.subject_id);
-        const hints = parsed.hints;
-        if (Number.isInteger(hints)) entry.hints_bought += hints;
-      }
+      if (profile.activity) profile.activity(row.name, parsed, bucketOf(row.app, row.subject_id));
     }
 
     for (const [key, value] of totals) {
