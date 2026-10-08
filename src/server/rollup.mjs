@@ -97,6 +97,16 @@ function metricName(name, parsedProps) {
   return [name, ...parts].join(':');
 }
 
+/**
+ * Отчётная площадка строки `daily` (K-10). У удостоверённой сессии — площадка
+ * из подписи. У неудостоверённой — то, что назвал клиент (`client_platform`),
+ * а если не назвал — прежняя `platform` ('local'). Без этого гости Яндекса
+ * лежали бы в `local` вместе с запусками без площадки вовсе. Сессии без
+ * `client_platform` (word-chain, старые строки) дают прежнюю разбивку.
+ */
+const REPORTED_PLATFORM =
+  'CASE WHEN s.verified = 1 THEN s.platform ELSE COALESCE(s.client_platform, s.platform) END';
+
 export function rollup(db, day) {
   const put = db.prepare(
     `INSERT INTO daily (app, day, platform, metric, value) VALUES (?,?,?,?,?)
@@ -129,9 +139,9 @@ export function rollup(db, day) {
     // поэтому обычное `=`, без NULL-safe `IS`/`IS NOT`, которое требовалось
     // старой, нулевой у части сессий колонке.
     const audience = db.prepare(
-      `SELECT s.app AS app, s.platform AS platform,
+      `SELECT s.app AS app, ${REPORTED_PLATFORM} AS platform,
               COUNT(DISTINCT s.subject_id) AS dau, COUNT(*) AS sessions
-       FROM sessions s WHERE s.day = ? AND s.server_origin = 0 GROUP BY s.app, s.platform`,
+       FROM sessions s WHERE s.day = ? AND s.server_origin = 0 GROUP BY 1, 2`,
     ).all(day);
     for (const row of audience) {
       put.run(row.app, day, row.platform, 'dau', row.dau);
@@ -156,7 +166,7 @@ export function rollup(db, day) {
     // в память ДВАЖДЫ (по разу на прежний `counted` и `perDay`) — на машине
     // с 1967 МБ, где рядом ещё один процесс, так делать нельзя.
     const rows = db.prepare(
-      `SELECT s.app AS app, s.platform AS platform, s.subject_id AS subject_id,
+      `SELECT s.app AS app, ${REPORTED_PLATFORM} AS platform, s.subject_id AS subject_id,
               e.name AS name, e.props AS props, e.known AS known
        FROM events e JOIN sessions s ON s.session_id = e.session_id
        WHERE e.day = ?`,

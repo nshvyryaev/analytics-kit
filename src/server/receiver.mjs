@@ -20,7 +20,7 @@
  */
 import { randomBytes } from 'node:crypto';
 
-import { validate, validateClient } from '../schema.mjs';
+import { SESSION_CTX, validate, validateClient } from '../schema.mjs';
 import { anonSubject, playerSubject } from './identity.mjs';
 
 const MAX_BATCH = 100;
@@ -43,6 +43,10 @@ const bounded = (value, max) => (typeof value === 'string' ? value.slice(0, max)
  */
 const ENTRY_VALUES = ['direct', 'shared', 'daily'];
 const normalizedEntry = (value) => (ENTRY_VALUES.includes(value) ? value : null);
+
+/** `ctx.platform` по перечислению приложения (K-10); иначе — NULL. */
+const clientPlatform = (app, value) =>
+  (SESSION_CTX[app]?.platform?.includes(value) ? value : null);
 
 export function createReceiver({
   sink, key, keyVersion = 1, apps, verify, now = Date.now,
@@ -186,6 +190,7 @@ export function createReceiver({
           mobile: ctx.mobile ? 1 : 0,
           screen: bounded(ctx.screen, 4),
           entry: normalizedEntry(ctx.entry),
+          client_platform: clientPlatform(app, ctx.platform),
           // Этот путь — единственный, где сессию заводит клиентский запрос,
           // и `server_origin` здесь всегда 0 буквально: не переменная,
           // которая могла бы случайно унаследовать что-то из `ctx`, а

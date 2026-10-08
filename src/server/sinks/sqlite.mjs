@@ -37,7 +37,11 @@ const SCHEMA = `
     day          TEXT    NOT NULL,
     started_at   INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
-    events       INTEGER NOT NULL DEFAULT 0
+    events       INTEGER NOT NULL DEFAULT 0,
+    -- Площадка по словам клиента (ctx.platform, перечисление SESSION_CTX[app]),
+    -- NULL — не прислал. Не признак доверия: отчётная площадка берёт её только у
+    -- неудостоверённой сессии — verified ? platform : COALESCE(client_platform, platform) (K-10).
+    client_platform TEXT
   );
   CREATE INDEX IF NOT EXISTS sessions_day     ON sessions (app, day);
   CREATE INDEX IF NOT EXISTS sessions_subject ON sessions (app, subject_id);
@@ -135,6 +139,9 @@ const MIGRATIONS = {
     // релизе, что и сам столбец), так что 0 для них не запись «неизвестно»,
     // а точный факт.
     ['server_origin', 'INTEGER NOT NULL DEFAULT 0'],
+    // v0.3.0: client_platform — площадка по словам клиента (K-10). NULL у
+    // старых строк верен: тогда её не присылали, отчётная площадка прежняя.
+    ['client_platform', 'TEXT'],
   ],
   events: [
     // v0.3.0: dropped — что словарь отбросил у известного события (K-9).
@@ -181,8 +188,9 @@ export function createSqliteSink(db) {
   const insertSession = db.prepare(
     `INSERT OR IGNORE INTO sessions
        (session_id, app, subject_id, anon_subject, key_version, platform, verified,
-        app_version, language, os, mobile, screen, entry, server_origin, day, started_at, last_seen_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        app_version, language, os, mobile, screen, entry, server_origin, day, started_at, last_seen_at,
+        client_platform)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   // Прирост `sessions` — параметр, а не зашитая единица: серверная
   // псевдосессия, привязанная к игроку (analytics-kit v0.2.0, receiver.mjs
@@ -228,7 +236,7 @@ export function createSqliteSink(db) {
           row.session_id, row.app, row.subject_id, row.anon_subject, row.key_version,
           row.platform, row.verified, row.app_version, row.language, row.os,
           row.mobile, row.screen, row.entry, row.server_origin ? 1 : 0,
-          row.day, row.started_at, row.last_seen_at,
+          row.day, row.started_at, row.last_seen_at, row.client_platform ?? null,
         );
         // Повтор той же строки сессии (тот же session_id) — не ошибка: у
         // площадки нет способа отличить потерянный ответ от необработанного
