@@ -26,7 +26,8 @@
 - **`src/server`** — приёмник, который принимает пачки по HTTP, устанавливает
   личность игрока по подписи площадки и пишет их через `sink`. Экспортирует
   `createReceiver(options)`, а также `anonSubject`/`playerSubject`/`subject` из
-  `identity.mjs` и `prune`/`rollup` из `rollup.mjs`.
+  `identity.mjs`, `prune`/`rollup`/`ROLLUP` из `rollup.mjs` и `inferEnds` из
+  `infer.mjs`.
 - **`src/schema.mjs`** — общий словарь событий: имена и форма свойств. Один на
   клиент и сервер: опечатка в имени события иначе тихо заводит новую метрику, а
   необъявленное свойство тихо копится в базе и ничего не значит.
@@ -37,6 +38,9 @@
   Отброшенные свойства известного события возвращаются в `dropped` (имена через
   запятую; поля нет, если ничего не отброшено). `SERVER_ONLY` — события, факт
   которых знает только сервер: от клиента они пишутся с `known = 0`.
+  `SESSION_CTX[app]` — перечисления полей `ctx`, которые приложение пишет в
+  `sessions` сверх общих (сейчас `ctx.platform` у image-uncovered →
+  `sessions.client_platform`).
 
 Клиент и сервер связаны только формой тела запроса, не общим модулем событий:
 клиент шлёт имена строками, приёмник их проверяет по словарю сам. Так
@@ -139,8 +143,25 @@ interface Sink {
   метрика, хранить его вечно не нужно.
 - **Измерение** (`subjects`, `aliases`) — кто есть кто: псевдонимы игроков,
   привязка анонимного идентификатора к игроку после входа.
-- **Свёртки** (`activity`) — подневные счётчики по игроку, которые строит
-  `rollup`.
+- **Свёртки** (`activity`, `daily`) — подневные счётчики по игроку и
+  суточные метрики по площадкам, которые строит `rollup`.
+
+Свёртка идёт по профилю приложения `ROLLUP[app]`: измерения имени метрики,
+правила счётчиков `activity` и пары «старт → конец» для `inferEnds`. Профиль
+word-chain — прежние измерения (`level_end:solved:5`) и счётчики; профиль
+image-uncovered — голые имена событий и `activity` по факту сессии; приложение
+без профиля — `dau`, `sessions`, голые имена. Площадка строки `daily` —
+отчётная: `verified ? platform : COALESCE(client_platform, platform)`.
+
+`inferEnds(db, { app, olderThan })` — ночной вывод потерянных концов: старту
+старше `olderThan` без конца с тем же ключом попытки (у того же анонима, в
+любой сессии) дописывается конец с `inferred: true` в сессию старта, `seq =
+−seq старта`. Идемпотентно; если настоящий конец пришёл позже, дописанный
+удаляется. Порядок обслуживания: `inferEnds` → `rollup` за D-1 и D-2 → `prune`.
+
+Миграции (`MIGRATIONS` в `sinks/sqlite.mjs`) только добавляют столбцы:
+`sessions.server_origin` (v0.2.2), `sessions.client_platform` и
+`events.dropped` (v0.3.0). `openAnalyticsDb` применяет их сам.
 
 Измерение и свёртки живут вечно — глубина истории по игроку не должна зависеть
 от того, насколько глубоко хранится сырьё. Отдельный файл базы (не общие
@@ -154,7 +175,9 @@ npm install analytics-kit  # или submodule/vendor — пакет без сб�
 ```
 
 ```js
-import { createReceiver, createSqliteSink, openAnalyticsDb, prune, rollup } from 'analytics-kit/server';
+import {
+  createReceiver, createSqliteSink, inferEnds, openAnalyticsDb, prune, rollup,
+} from 'analytics-kit/server';
 import { createClient } from 'analytics-kit/browser';
 ```
 
