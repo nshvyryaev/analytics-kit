@@ -202,7 +202,7 @@ const IMAGE_UNCOVERED = {
     from: 'str',
   },
   campaign_select: { campaign_id: 'str', campaigns_done: 'int', locked: 'bool' },
-  settings_change: { key: ['control_side', 'haptics', 'controls_visibility', 'theme'], value: 'str' },
+  settings_change: { key: ['control_side', 'haptics', 'controls_visibility', 'theme', 'volume'], value: 'str' },
 
   // Забег и уровни
   run_start: { mode: IU_MODE, campaign_id: 'str', lives: IU_LIVES, ad_free: 'bool', resumed: 'bool' },

@@ -38,6 +38,12 @@ test('список событий image-uncovered равен словарю data
   assert.equal(names.length, 33);
 });
 
+test('image-uncovered: настройка громкости проходит settings_change с целым процентом', () => {
+  const out = validate('settings_change', { key: 'volume', value: '37' }, 'image-uncovered');
+  assert.equal(out.known, true);
+  assert.deepEqual(out.props, { key: 'volume', value: '37' });
+});
+
 test('раздел приложения перекрывает общее событие целиком', () => {
   // У IU начисление без подсказок, у word-chain — с ними.
   assert.deepEqual(dictionary('image-uncovered').purchase_credited, COMMON.purchase_credited);
